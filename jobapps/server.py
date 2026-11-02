@@ -72,7 +72,8 @@ def remember(label: str, answer, rule: str = "", kind: str = "", source: str = "
         return "not stored"
     if authoritative(rule) or authoritative(rule_source(label, load_profile())):
         return "not stored"
-    if rule in PROFILE_TARGETS and isinstance(answer, str) and answer.strip():
+    # Only a typed answer becomes a profile value; a picked option ("Below $60,000") belongs to that one question.
+    if rule in PROFILE_TARGETS and kind in ("text", "combobox", "") and isinstance(answer, str) and answer.strip():
         try:
             config.update_profile({rule: answer.strip()})
             return f"profile: {rule}"

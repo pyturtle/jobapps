@@ -479,9 +479,13 @@ RULES: list[tuple[str, str, Handler, bool]] = [
      P("preferences.salary_expectation"), True),
     ("skills", r"^(your |technical |key )?skills?$|type to add skills|add (your )?skills", skills, True),
     ("signature_date", r"^(today'?s )?date$|^date signed$|signature date", today, False),
-    ("employer", r"current (company|employer)|^(company|employer)( name)?$|most recent (employer|company)",
+    # Only questions asking for the name itself ("Current employer", "Name of your current company"), not ones
+    # that merely mention it ("notice period with your current employer").
+    ("employer", r"^((your|name of (your )?)?(current|most recent|present) )?(company|employer)( name)?\??$"
+                 r"|^(what is the )?name of your (current|most recent) (company|employer)|^who is your current employer",
      P("experience.current_company", optional=True), False),
-    ("job_title", r"current (job )?(title|role|position)|^(job )?title$", P("experience.current_title", optional=True), False),
+    ("job_title", r"^((your|current|most recent|present) )+(job )?(title|role|position)( title)?\??$|^(job )?title$",
+     P("experience.current_title", optional=True), False),
     ("legal", r"non-?compete|non-?solicit|background check|convicted|criminal|felony|drug (test|screen)|export control"
               r"|\bitar\b|security clearance", leave("legal/eligibility question - answer it yourself"), True),
     ("consent", r"^i (agree|acknowledge|consent|certify|confirm|understand|have read|accept)|privacy (policy|notice)"

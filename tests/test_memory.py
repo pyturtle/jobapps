@@ -82,3 +82,25 @@ def test_open_questions_are_counted_and_cleared(tmp_path):
     assert db.unanswered(conn) == []
     db.note_unanswered(conn, [q], "Steel", "c")  # dismissed stays hidden
     assert db.unanswered(conn) == []
+
+
+def test_a_picked_option_never_overwrites_the_profile(monkeypatch):
+    writes, learned = [], []
+    monkeypatch.setattr(server.config, "update_profile", lambda updates: writes.append(updates))
+    monkeypatch.setattr(server, "load_learned", lambda: list(learned))
+    monkeypatch.setattr(server, "save_learned", lambda entries: (learned.clear(), learned.extend(entries)))
+    # a salary-range dropdown is that question's answer, not your salary expectation
+    assert server.remember("Desired salary", "Below $60,000", "preferences.salary_expectation", "dropdown") == "learned"
+    assert server.remember("Desired salary", "25", "preferences.salary_expectation", "text").startswith("profile")
+    assert writes == [{"preferences.salary_expectation": "25"}]
+
+
+def test_employer_rule_only_matches_questions_asking_for_it():
+    profile = Profile({"experience": {"current_company": "Initech", "current_title": "Developer"}}, root=Path("."))
+    r = Resolver(profile, {})
+    assert r.resolve(Field("k", "Current Employer", "text")).value == "Initech"
+    assert r.resolve(Field("k", "Name of your current company", "text")).value == "Initech"
+    notice = r.resolve(Field("k", "Please specify your required notice period with your current employer", "radio",
+                             options=["2 weeks", "No notice period required"]))
+    assert notice.source != "experience.current_company"
+    assert r.resolve(Field("k", "What do you enjoy about your current role?", "text")).kind == "draft"
