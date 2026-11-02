@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Everything personal stays on your machine: the database, logs, backups, saved prompts and reports...
+data/
+reports/
+*.db
+*.db-*
+*.log
+# ...your details, notes, remembered answers and resume (templates: profile.example.yaml, background.example.md)
+profile.yaml
+background.md
+learned_answers.yaml
+*.pdf
+# temporary files from safe (write-then-swap) saves, and downloaded extension builds
+*.tmp
+jobapps-extension/
+jobapps-extension.zip

@@ -1,0 +1,113 @@
+# Your values. The autofiller only ever types what is here (or in learned_answers.yaml).
+# Anything left as TODO is treated as unknown: those fields are highlighted for you instead of guessed.
+# A list means "try these in order" when picking from a dropdown.
+# This is the template: on first run it's copied to profile.yaml (which stays on your machine,
+# never in git). Most of it can also be filled in from the dashboard's Setup page.
+
+name:
+  first: TODO
+  last: TODO
+  preferred: ""
+  middle: ""
+  full: ""                 # blank = "first last"
+pronouns: ""               # blank = skip the question
+email: TODO
+phone: TODO                # e.g. 416-555-0123
+
+location: TODO             # e.g. "Toronto, Ontario, Canada"
+address:
+  city: ""
+  region: ""
+  country: ""
+  postal_code: ""
+  line1: ""
+  line2: ""                # apartment / unit; blank = skipped
+
+links:
+  linkedin: ""             # https://www.linkedin.com/in/...
+  github: ""               # https://github.com/...
+  website: ""
+  twitter: ""
+
+education:
+  school: TODO
+  degree: ["Bachelor of Science", "Bachelor's"]   # every way a form might say it, best first
+  major: TODO
+  minor: ""
+  gpa: ""                  # blank = left for you when a form asks
+  start_month: ""          # e.g. September
+  start_year: TODO
+  graduation_month: ""     # e.g. May
+  graduation_year: TODO
+  year_of_study: []        # e.g. ["3rd year", "Third year", "Junior"]
+  currently_enrolled: true
+
+experience:
+  current_company: ""
+  current_title: ""
+  # Every job, newest first, copied from your resume. Typed into "Work Experience" sections
+  # (Workday's My Experience page and similar). end: present = you still work there.
+  # Easiest to edit in the dashboard: Setup -> Work history and skills.
+  history: []
+  #  - title: "Software Developer Intern"
+  #    company: "Example Corp"
+  #    location: "Toronto, ON"
+  #    start: "May 2026"
+  #    end: "August 2026"
+  #    description: |-
+  #      One line per thing you did, as on your resume.
+
+citizenship: []            # e.g. ["Canadian"] - used to rule out citizenship/clearance-only postings
+
+skills:                    # the fit check reads skills from your resume; adjust here if it misses or over-reads
+  extra: []                # e.g. ["Kubernetes"]
+  exclude: []              # e.g. ["MATLAB"]
+  # Added one by one to "Skills" boxes (e.g. Workday's), in this order.
+  list: []                 # e.g. ["Python", "TypeScript", "React", "SQL"]
+
+# Legal questions are never guessed. Set these to true/false.
+work_authorization:        # "Are you legally authorized to work in <country>?"
+  canada: TODO
+  us: TODO
+needs_sponsorship:         # "Will you now or in the future require visa sponsorship in <country>?"
+  canada: TODO
+  us: TODO
+
+preferences:
+  term: ["Summer 2027"]
+  locations: []            # offices you'd pick on "which locations are you open to?", e.g. ["Toronto", "New York"]
+  start_date: ""           # e.g. May 2027
+  end_date: ""
+  willing_to_relocate: true
+  willing_onsite: true
+  heard_about: ["Job board", "Online job board", "Internet", "LinkedIn", "Other"]
+  referrer: ""
+  salary_expectation: ""   # blank = left for you
+
+eeo:                       # "decline" picks the "Decline to self-identify" style option
+  gender: decline
+  race: decline
+  hispanic: decline
+  veteran: decline
+  disability: decline
+  sexual_orientation: decline
+  transgender: decline
+  age: decline
+
+files:
+  resume: "resume.pdf"     # put your resume PDF in this folder (or upload it in Setup)
+  cover_letter: ""
+  transcript: ""
+
+# How drafted answers should be written, in your own words (e.g. "Lead with my internship project,
+# not the hackathon one"). Added from the dashboard when you tick "Remember this for future answers".
+# Instructions only: facts still have to come from your resume and notes.
+writing_preferences: []
+
+# Your own rules, checked before everything else. `match` is a regex against the lowercased
+# question; `answer` is typed / matched to an option. Use `answer: null` to always leave it blank.
+custom_answers:
+  - match: "at least 18|over (the age of )?18|18 years"
+    answer: "Yes"
+  # - match: "how many hours (per|a) week"
+  #   answer: "40"

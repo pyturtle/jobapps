@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Software Intern - Workday mock</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 0; }
+  main { max-width: 760px; margin: 0 auto; padding: 20px; }
+  [data-automation-id^="formField-"] { margin: 10px 0; }
+  label { display: block; font-weight: 600; }
+  input[type=text], textarea { width: 320px; padding: 6px; }
+  [role=group][aria-labelledby$="-panel"] { border: 1px solid #ccc; padding: 8px; margin: 8px 0; }
+  [data-automation-activepopup] { position: absolute; background: #fff; border: 1px solid #999; z-index: 50; max-height: 220px; overflow: auto; min-width: 260px; }
+  [data-automation-activepopup="false"] { display: none; }
+  [role=option], [data-automation-id=promptLeafNode] { padding: 4px 8px; cursor: pointer; }
+  [data-automation-id=dateInputWrapper] { display: inline-flex; gap: 4px; align-items: center; }
+  [data-automation-id=dateInputWrapper] input { width: 60px; }
+  .page[hidden] { display: none; }
+  ul[data-automation-id=selectedItemList] { list-style: none; padding: 0; margin: 4px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+  [data-automation-id=selectedItem] { background: #e5ecff; padding: 2px 6px; border-radius: 10px; display: flex; gap: 4px; }
+</style></head>
+<body>
+<main id="mainContent">
+<ol data-automation-id="progressBar"></ol>
+<h3 id="pageTitle"></h3>
+<div id="pages"></div>
+<div data-automation-id="pageFooter"><button data-automation-id="pageFooterNextButton" id="next">Save and Continue</button></div>
+</main>
+<script>
+// ---------------------------------------------------------------- data
+const SKILLS = ["Python (Programming Language)", "TypeScript", "JavaScript (Programming Language)", "SQL (Programming Language)",
+  "C (Programming Language)", "C++ (Programming Language)", "C# (Programming Language)", "Java (Programming Language)", "JavaScript Frameworks",
+  "React.js", "React Native", "Reactive Programming", "Next.js", "Node.js", "Tailwind CSS", "Flask (Web Framework)", "PyTorch (Machine Learning Library)",
+  "OpenCV", "Git", "GitHub", "GitHub Actions", "PostgreSQL", "Amazon Web Services (AWS)", "AWS Lambda", "Google Cloud Platform (GCP)", "Raspberry Pi",
+  "Playwright", "Vercel", "Docker (Software)", "Kubernetes"];
+const FIELDS_OF_STUDY = ["Computer Science", "Computer Engineering", "Computer Science and Mathematics", "Mathematics", "Physics"];
+const PHONE_CODES = ["Canada (+1)", "United States of America (+1)", "United Kingdom (+44)", "India (+91)"];
+const HEARD = { "Job Board": ["LinkedIn", "Indeed", "Glassdoor"], "Social Media": ["Instagram", "X"], "Referral": ["Employee Referral"], "Company Website": null };
+const state = {};   // what the "app" believes each text box holds (only real input events update it)
+const log = [];
+window.__mockLog = log;
+
+// ---------------------------------------------------------------- tiny DOM helpers
+const el = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; };
+let uid = 100;
+const nextId = () => ++uid;
+
+function textField(fid, name, label, required, textarea) {
+  const tag = textarea ? `<textarea id="${fid}" aria-required="${required}"></textarea>` : `<input type="text" id="${fid}" name="${name}" aria-required="${required}">`;
+  return `<div data-automation-id="formField-${name}" data-fkit-id="${fid}"><label for="${fid}"><span>${label}${required ? '<abbr aria-hidden="true">*</abbr>' : ''}</span></label><div><div>${tag}</div></div></div>`;
+}
+function dropdown(fid, name, label, options, required = true, legend = false) {
+  const head = legend ? `<fieldset><legend><div data-automation-id="richText"><p><b>${label}</b><abbr title="required">*</abbr></p></div></legend>`
+    : `<label for="${fid}"><span>${label}${required ? '<abbr aria-hidden="true">*</abbr>' : ''}</span></label>`;
+  return `<div data-automation-id="formField-${name}" data-fkit-id="${fid}">${head}<div><div><button aria-haspopup="listbox" type="button" value="" aria-label="${legend ? '' : label} Select One${required ? ' Required' : ''}" name="${name}" id="${fid}" data-options='${JSON.stringify(options).replace(/'/g, '&#39;')}'>Select One</button><input type="text" style="opacity:0;width:1px;height:1px;position:absolute"></div></div>${legend ? '</fieldset>' : ''}</div>`;
+}
+function prompt(fid, name, label, kind, required = false) {
+  const box = `m${nextId()}`;
+  return `<div data-automation-id="formField-${name}" data-fkit-id="${fid}"><label for="${fid}">${label}</label><div><div data-automation-id="multiSelectContainer" id="${box}" data-uxi-widget-type="multiselect" data-kind="${kind}"><div data-automation-id="multiselectInputContainer"><div><input placeholder="Search" autocomplete="off" data-uxi-widget-type="selectinput" id="${fid}" aria-required="${required}"><div data-automation-id="promptAriaInstruction">0 items selected</div></div></div><ul role="listbox" data-automation-id="selectedItemList" aria-label="items selected"></ul></div></div></div>`;
+}
+function date(fid, label, parts, required = true) {
+  const sec = (p) => `<div id="${fid}-dateSection${p}"><div aria-hidden="true" data-automation-id="dateSection${p}-display"></div><input role="spinbutton" aria-label="${p}" id="${fid}-dateSection${p}-input" data-automation-id="dateSection${p}-input"></div>`;
+  return `<div data-automation-id="formField-${fid.split('--')[1]}" data-fkit-id="${fid}"><fieldset><legend><label id="lbl${nextId()}"><span>${label}${required ? '<abbr aria-hidden="true">*</abbr>' : ''}</span></label></legend><div><div aria-hidden="true" id="helpText-${fid}">current value is </div><div id="${fid}" role="group" data-automation-id="dateInputWrapper">${parts.map(sec).join('<div>/</div>')}</div></div></fieldset></div>`;
+}
+function checkbox(fid, name, label) {
+  return `<div data-automation-id="formField-${name}" data-fkit-id="${fid}"><label for="${fid}">${label}</label><div><input id="${fid}" type="checkbox" aria-checked="false" name="${name}"></div></div>`;
+}
+function section(title, panelsHtml, addable) {
+  const sid = `${title.replace(/ /g, '-')}-section`;
+  return `<div role="group" aria-labelledby="${sid}"><h4 id="${sid}">${title}</h4><div class="panels">${panelsHtml || ''}</div>${addable ? `<div><button data-automation-id="add-button" data-section="${title}">${panelsHtml ? 'Add Another' : 'Add'}</button></div>` : ''}</div>`;
+}
+function panel(title, n, inner) {
+  const pid = `${title.replace(/ /g, '-')}-${n}-panel`;
+  return `<div role="group" aria-labelledby="${pid}"><div><h5 id="${pid}">${title} ${n}</h5><button>Delete</button></div>${inner}</div>`;
+}
+const PANELS = {
+  'Work Experience': () => { const k = nextId(); const f = (x) => `workExperience-${k}--${x}`;
+    return textField(f('jobTitle'), 'jobTitle', 'Job Title', true) + textField(f('companyName'), 'companyName', 'Company', true)
+      + textField(f('location'), 'location', 'Location', false) + checkbox(f('currentlyWorkHere'), 'currentlyWorkHere', 'I currently work here')
+      + `<div class="dates">${date(f('startDate'), 'From', ['Month', 'Year'])}<div class="to">${date(f('endDate'), 'To', ['Month', 'Year'])}</div></div>`
+      + textField(f('roleDescription'), 'roleDescription', 'Role Description', false, true); },
+  'Education': () => { const k = nextId(); const f = (x) => `education-${k}--${x}`;
+    return textField(f('schoolName'), 'schoolName', 'School or University', true)
+      + dropdown(f('degree'), 'degree', 'Degree', ["Associate's Degree", "BA", "Bachelor's Degree", "Bachelor of Science", "Master's Degree", "PhD"])
+      + prompt(f('fieldOfStudy'), 'fieldOfStudy', 'Field of Study', 'study')
+      + textField(f('gradeAverage'), 'gradeAverage', 'Overall Result (GPA)', false)
+      + date(f('firstYearAttended'), 'From', ['Year'], false) + date(f('lastYearAttended'), 'To (Actual or Expected)', ['Year'], false); },
+  'Websites': () => { const k = nextId(); return textField(`webAddress-${k}--url`, 'url', 'URL', true); },
+};
+
+// ---------------------------------------------------------------- pages
+const PAGES = [
+  ['My Information', () => `<div data-automation-id="applyFlowMyInfoPage">
+    ${dropdown('country--country', 'country', 'Country', ['Canada', 'United States of America', 'United Kingdom'])}
+    <div id="nameAddr"></div>
+    ${dropdown('phoneNumber--phoneType', 'phoneType', 'Phone Device Type', ['Landline', 'Mobile', 'Telephone'])}
+    ${prompt('phoneNumber--countryPhoneCode', 'countryPhoneCode', 'Country Phone Code', 'phone', true)}
+    ${textField('phoneNumber--phoneNumber', 'phoneNumber', 'Phone Number', true)}
+    ${textField('phoneNumber--extension', 'extension', 'Phone Extension', false)}
+    ${prompt('source--source', 'source', 'How Did You Hear About Us?', 'heard', true)}
+    <div data-automation-id="formField-candidateIsPreviousWorker"><fieldset><legend><label>Have you previously worked for MockCo?<abbr>*</abbr></label></legend>
+      <div id="previousWorker--candidateIsPreviousWorker"><input type="radio" name="candidateIsPreviousWorker" value="true" id="r1"><label for="r1">Yes</label>
+      <input type="radio" name="candidateIsPreviousWorker" value="false" id="r2"><label for="r2">No</label></div></fieldset></div></div>`],
+  ['My Experience', () => `<div data-automation-id="applyFlowMyExpPage">
+    ${section('Work Experience', '', true)}${section('Education', '', true)}
+    <div role="group" aria-labelledby="Skills-section"><h4 id="Skills-section">Skills</h4>${prompt('skills--skills', 'skills', 'Type to Add Skills', 'skills')}</div>
+    <div role="group" aria-labelledby="Resume/CV-section"><h4 id="Resume/CV-section">Resume/CV</h4><div data-automation-id="formField-" data-fkit-id="resumeAttachments--attachments"><label id="label174"><span>Upload a file (5MB max)<abbr aria-hidden="true">*</abbr></span></label><div data-automation-id="attachments-FileUpload" aria-labelledby="label174"><div data-automation-id="file-upload-drop-zone"><div>Drop files here</div><button type="button" data-automation-id="select-files">Select files</button></div><input data-automation-id="file-upload-input-ref" type="file" multiple style="opacity:0;width:1px"><div class="uploaded"></div></div></div></div>
+    ${section('Websites', '', true)}</div>`],
+  ['Application Questions', () => `<div data-automation-id="applyFlowPrimaryQuestionsPage">
+    ${dropdown('primaryQuestionnaire--q1', 'q1', 'Are you legally authorized to work in Canada?', ['Yes', 'No'], true, true)}
+    ${dropdown('primaryQuestionnaire--q2', 'q2', 'Will you now or in the future require sponsorship for employment visa status in Canada?', ['Yes', 'No'], true, true)}
+    ${dropdown('primaryQuestionnaire--q3', 'q3', 'How long ago was your date of graduation?', ['Not yet graduated', '0-2 years', '3-5 years', '5+ years'], true, true)}
+    ${dropdown('primaryQuestionnaire--q4', 'q4', 'Are you authorized to work in Canada? Choose the statement that applies.', ['I am authorized to work in Canada for any employer', 'I am not authorized to work in Canada'], true, true)}</div>`],
+  ['Voluntary Disclosures', () => `<div data-automation-id="applyFlowVoluntaryDisclosuresPage">
+    ${dropdown('personalInfoPerson--gender', 'gender', 'Gender', ['Male', 'Female', 'Non-binary', 'I do not wish to answer'])}
+    ${dropdown('personalInfoPerson--veteranStatus', 'veteranStatus', 'Veteran Status', ['I am a veteran', 'I am not a veteran', 'I do not wish to self-identify'])}
+    <div data-automation-id="formField-acceptTermsAndAgreements"><label for="termsAndConditions--acceptTermsAndAgreements">Yes, I have read and consent to the terms and conditions</label><input type="checkbox" id="termsAndConditions--acceptTermsAndAgreements" aria-checked="false"></div></div>`],
+];
+let step = 0;
+function showStep(i) {
+  step = i;
+  document.getElementById('pages').innerHTML = PAGES[i][1]();
+  document.getElementById('pageTitle').textContent = PAGES[i][0];
+  document.querySelector('[data-automation-id=progressBar]').innerHTML = PAGES.map((p, j) =>
+    `<li data-automation-id="progressBar${j === i ? 'Active' : j < i ? 'Completed' : 'Inactive'}Step"><label>${p[0]}</label></li>`).join('');
+  if (i === 0) renderAddress('');
+  wire();
+}
+function renderAddress(country) {  // the address block depends on the country, like Workday's
+  const box = document.getElementById('nameAddr');
+  box.innerHTML = textField('name--legalName--firstName', 'legalName--firstName', 'Given Name(s)', true)
+    + textField('name--legalName--lastName', 'legalName--lastName', 'Family Name', true)
+    + `<div data-automation-id="formField-preferredCheck"><label for="name--preferredCheck">I have a preferred name</label><input type="checkbox" id="name--preferredCheck" aria-checked="false"></div>`
+    + textField('address--addressLine1', 'addressLine1', 'Address Line 1', false) + textField('address--addressLine2', 'addressLine2', 'Address Line 2', false)
+    + textField('address--city', 'city', 'City', true)
+    + (country === 'Canada' ? dropdown('address--countryRegion', 'countryRegion', 'Province or Territory', ['Alberta', 'British Columbia', 'Ontario', 'Quebec'])
+       : dropdown('address--countryRegion', 'countryRegion', 'State', ['California', 'New York', 'Texas']))
+    + textField('address--postalCode', 'postalCode', 'Postal Code', false);
+  wire();
+}
+
+// ---------------------------------------------------------------- behaviour
+function wire() {
+  for (const inp of document.querySelectorAll('input[type=text], textarea')) {
+    if (inp.dataset.wired) continue; inp.dataset.wired = 1;
+    if (inp.matches('[data-uxi-widget-type=selectinput]')) continue;
+    state[inp.id] = state[inp.id] || '';
+    inp.addEventListener('input', () => { state[inp.id] = inp.value; });
+    // Like a React-controlled box: what the app holds wins when you leave the field.
+    inp.addEventListener('blur', () => { if (inp.value !== state[inp.id]) { log.push(`reverted ${inp.id}`); inp.value = state[inp.id]; } });
+  }
+  for (const btn of document.querySelectorAll('button[aria-haspopup=listbox]')) {
+    if (btn.dataset.wired) continue; btn.dataset.wired = 1;
+    btn.addEventListener('click', () => openList(btn));
+  }
+  for (const box of document.querySelectorAll('[data-automation-id=multiSelectContainer]')) {
+    if (box.dataset.wired) continue; box.dataset.wired = 1;
+    const inp = box.querySelector('input');
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); search(box, inp.value); } });
+    inp.addEventListener('click', () => { if (!inp.value) browse(box); });
+  }
+  for (const wrap of document.querySelectorAll('[data-automation-id=dateInputWrapper]')) {
+    if (wrap.dataset.wired) continue; wrap.dataset.wired = 1;
+    for (const inp of wrap.querySelectorAll('input')) inp.addEventListener('input', () => dateInput(wrap, inp));
+  }
+  for (const cb of document.querySelectorAll('input[type=checkbox]')) {
+    if (cb.dataset.wired) continue; cb.dataset.wired = 1;
+    cb.addEventListener('click', () => setTimeout(() => {
+      cb.setAttribute('aria-checked', String(cb.checked));
+      if (cb.name === 'currentlyWorkHere') cb.closest('[role=group]').querySelector('.to').hidden = cb.checked;  // no end date when current
+    }, 120));
+  }
+  for (const add of document.querySelectorAll('[data-automation-id=add-button]')) {
+    if (add.dataset.wired) continue; add.dataset.wired = 1;
+    add.addEventListener('click', () => setTimeout(() => {
+      const title = add.dataset.section; const panels = add.closest('[role=group]').querySelector('.panels');
+      const n = panels.children.length + 1;
+      panels.append(el(panel(title, n, PANELS[title]()))); add.textContent = 'Add Another'; wire();
+    }, 300));
+  }
+  const file = document.querySelector('[data-automation-id=file-upload-input-ref]');
+  if (file && !file.dataset.wired) { file.dataset.wired = 1;
+    file.addEventListener('change', () => setTimeout(() => {
+      const f = file.files[0]; if (!f) return;
+      file.closest('[data-automation-id=attachments-FileUpload]').querySelector('.uploaded').innerHTML =
+        `<div data-automation-id="file-upload-item"><div data-automation-id="file-upload-item-name">${f.name}</div><div data-automation-id="file-upload-successful">Successfully Uploaded!</div><button data-automation-id="delete-file">x</button></div>`;
+      file.value = '';  // Workday empties the input once it has the file
+    }, 400));
+  }
+}
+function closePopups() { for (const p of document.querySelectorAll('[data-automation-activepopup="true"]')) p.setAttribute('data-automation-activepopup', 'false'); }
+function popupAt(anchor) {
+  closePopups();  // the old ones stay in the DOM, closed, like Workday's
+  const pop = el(`<div data-automation-activepopup="true" data-automation-id="activeListContainer"></div>`);
+  const r = anchor.getBoundingClientRect(); pop.style.left = `${r.left + scrollX}px`; pop.style.top = `${r.bottom + scrollY}px`;
+  document.body.append(pop); return pop;
+}
+function openList(btn) {
+  btn.setAttribute('aria-expanded', 'true');
+  const pop = popupAt(btn);
+  const opts = JSON.parse(btn.dataset.options);
+  pop.innerHTML = `<ul role="listbox">${['Select One', ...opts].map((o) => `<li role="option"><div>${o}</div></li>`).join('')}</ul>`;
+  setTimeout(() => {  // options become clickable a moment later, as on a slow tenant
+    pop.querySelectorAll('[role=option]').forEach((li, i) => li.addEventListener('click', () => {
+      if (i === 0) return;
+      btn.textContent = opts[i - 1]; btn.value = `id-${i}`; btn.setAttribute('aria-label', `${btn.name} ${opts[i - 1]} Required`);
+      btn.setAttribute('aria-expanded', 'false'); pop.setAttribute('data-automation-activepopup', 'false');
+      if (btn.id === 'country--country') renderAddress(opts[i - 1]);
+    }));
+  }, 150);
+}
+function addChip(box, label) {
+  box.querySelector('[data-automation-id=selectedItemList]').append(el(`<li data-automation-id="menuItem"><div role="option" data-automation-id="selectedItem" aria-label="${label}, press delete to clear value."><div data-automation-id="DELETE_charm">x</div><p data-automation-id="promptOption" data-automation-label="${label}">${label}</p></div></li>`));
+  const li = box.querySelector('[data-automation-id=selectedItemList]').lastChild;
+  li.querySelector('[data-automation-id=DELETE_charm]').addEventListener('click', () => li.remove());
+  const inp = box.querySelector('input'); inp.value = ''; closePopups();
+}
+function leaves(pop, box, labels, onPick) {
+  pop.innerHTML = labels.length ? labels.map((l) => `<div data-automation-id="promptLeafNode"><p data-automation-id="promptOption" data-automation-label="${l}">${l}</p></div>`).join('')
+    : `<div data-automation-id="promptTitle">No matches found</div>`;
+  pop.querySelectorAll('[data-automation-id=promptLeafNode]').forEach((n, i) => n.addEventListener('click', () => onPick(labels[i])));
+}
+function universe(kind) { return kind === 'skills' ? SKILLS : kind === 'study' ? FIELDS_OF_STUDY : kind === 'phone' ? PHONE_CODES : Object.values(HEARD).flat().filter(Boolean); }
+function search(box, q) {
+  const kind = box.dataset.kind; const pop = popupAt(box);
+  const hits = universe(kind).filter((x) => x.toLowerCase().includes(q.toLowerCase().trim()));
+  if (kind === 'study' && hits.length === 1) { addChip(box, hits[0]); return; }  // a single match commits on Enter
+  if (kind === 'heard') { leaves(pop, box, [], null); return; }                   // this tenant only lets you browse
+  leaves(pop, box, hits.slice(0, 50), (l) => addChip(box, l));
+}
+function browse(box) {
+  const kind = box.dataset.kind; const pop = popupAt(box);
+  if (kind !== 'heard') { leaves(pop, box, universe(kind).slice(0, 20), (l) => addChip(box, l)); return; }
+  leaves(pop, box, Object.keys(HEARD), (cat) => {
+    if (!HEARD[cat]) { addChip(box, cat); return; }
+    leaves(pop, box, HEARD[cat], (l) => addChip(box, l));  // a category: its children replace the list
+  });
+}
+function dateInput(wrap, inp) {
+  const part = inp.getAttribute('aria-label');
+  const v = inp.value.replace(/\D/g, '');
+  const yearBox = wrap.querySelector('[aria-label=Year]');
+  if (part === 'Month' && !yearBox.getAttribute('aria-valuenow')) {  // Workday quirk: month first on an empty date lands in the year
+    yearBox.value = String(2000 + Number(v)); yearBox.setAttribute('aria-valuenow', yearBox.value); inp.value = ''; log.push(`month-became-year ${wrap.id}`);
+  } else {
+    inp.setAttribute('aria-valuenow', v);
+    wrap.querySelector(`[data-automation-id=dateSection${part}-display]`).textContent = part === 'Year' ? v : v.padStart(2, '0');
+  }
+}
+document.getElementById('next').addEventListener('click', () => { if (step < PAGES.length - 1) showStep(step + 1); });
+document.addEventListener('mousedown', (e) => { if (!e.target.closest('[data-automation-activepopup], button[aria-haspopup], [data-automation-id=multiSelectContainer]')) closePopups(); });
+showStep(0);
+</script>
+</body></html>

@@ -1,0 +1,274 @@
+# What to look for and how to rank it. Every rule here is applied in a fixed order, so the
+# same listings on the same day always produce the same 5 picks. `ja explain N` shows the math.
+
+daily_count: 5          # jobs per day
+carry_over: true        # unfinished jobs stay on the list (apart from the day's new picks)...
+carry_days: 3           # ...for this many days; after that they're only under Postings -> On your list
+company_cooldown_days: 7  # skip companies you've had in the last week unless there aren't enough others
+max_per_company: 1      # at most this many jobs from one company per batch
+
+# Public feeds, chosen after checking ~40 candidates on 2026-10-25 (download, parse, overlap with Simplify).
+# A feed that fails to load is skipped for the day and never marks anything closed.
+sources:
+  - name: simplify-summer2027           # biggest list; JSON; bot updates every ~30 min on weekdays
+    url: https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json
+  - name: vanshb03-summer2027           # hand-curated; links are go.vansh.nyc short links (resolved + cached)
+    url: https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/.github/scripts/listings.json
+  - name: francklin-canada              # best Canada-only list: ~440 tech roles, real dates, PEY (12/16-month) tags
+    type: francklin
+    url: https://raw.githubusercontent.com/Francklin9999/canada-internship/master/INTERNSHIPS.md
+  - name: dreamwork-canada              # verified-open index; Canadian slice (~200 roles)
+    type: dreamwork
+    country: CA
+    url: https://raw.githubusercontent.com/dreamworkhq/Open-Tech-Internships-2027/main/data/international-listings.json
+  - name: speedyapply-swe-canada
+    type: speedyapply
+    country: Canada
+    url: https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/INTERN_INTL.md
+  - name: speedyapply-ai-canada
+    type: speedyapply
+    country: Canada
+    url: https://raw.githubusercontent.com/speedyapply/2027-AI-College-Jobs/main/INTERN_INTL.md
+  # New-grad roles instead/as well:
+  # - name: simplify-newgrad
+  #   url: https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json
+
+filters:
+  max_age_days: 21
+  # Simplify categories to keep (listings without a category always pass this check)
+  categories: ["Software", "Software Engineering", "AI/ML/Data", "Data Science, AI & Machine Learning", "Quant"]
+  title_include:        # regexes; a title must match one
+    - "software|developer|\\bswe\\b|\\bsde\\b|engineer"
+    - "machine learning|\\bml\\b|\\bai\\b|data|research"
+    - "backend|back-end|frontend|front-end|full[- ]?stack|platform|infrastructure|cloud|devops|security|quant"
+  title_exclude:        # regexes; any match drops the listing
+    - "ph\\.?d|doctoral|\\bmba\\b|master'?s"
+    - "mechanical|electrical|civil|chemical|manufacturing|hardware engineer|asic|fpga|rf\\b|analog|silicon"
+    - "sales|marketing|account(ing|ant)|recruit|legal|\\bhr\\b|human resources|supply chain"
+  exclude_terms: ["Summer 2026", "Fall 2026", "Winter 2026", "Spring 2026"]   # last cycle's postings
+  require_degree: "Bachelor's"        # drop listings whose degree list excludes this
+  exclude_sponsorship: ["U.S. Citizenship is Required"]
+  location_include: []                # empty = anywhere not excluded below
+  location_exclude:
+    - "\\bUK\\b|United Kingdom|London|Ireland|Germany|France|Netherlands|Poland|Spain|Switzerland|Israel"
+    - "India|Singapore|China|Japan|Korea|Taiwan|Hong Kong|Australia|Brazil|Mexico"
+  exclude_companies: []
+
+scoring:
+  recency_max: 40        # brand-new posting gets 40 points...
+  recency_per_day: 2     # ...minus 2 per day since posting
+  ats:                   # forms we can read ahead of time and fill reliably score higher
+    greenhouse: 15
+    lever: 15
+    ashby: 15
+    workday: 5             # descriptions are read now, and many Canadian employers use it
+    other: 0
+  categories:
+    Software: 6
+    Software Engineering: 6
+    AI/ML/Data: 5
+    "Data Science, AI & Machine Learning": 5
+    Quant: 3
+  terms:                     # terms you can't take sink (e.g. you're in class Jan-Apr); set to 0 if you can
+    Summer 2027: 5
+    Fall 2027: 2
+    Winter 2027: -25
+    Spring 2027: -25
+  locations:             # first matching rule wins, so keep these best-first
+    - {pattern: "toronto|markham|mississauga|waterloo(?!,\\s*(IA|Iowa))|oakville|vaughan|brampton|richmond hill", points: 30, label: "Toronto area"}
+    - {pattern: "canada|, (ON|BC|QC|AB)\\b|\\bCAN\\b", points: 24, label: "in Canada (no visa needed)"}
+    - {pattern: "remote", points: 4, label: "remote"}
+  title_keywords:            # tune to your resume: the kinds of work you've already shipped
+    - {pattern: "software|\\bswe\\b|developer", points: 5, label: "software role"}
+    - {pattern: "full[- ]?stack|front[- ]?end|web|product engineer", points: 5, label: "full-stack/web"}
+    - {pattern: "\\bai\\b|machine learning|\\bml\\b|\\bllm|agent|applied ai|genai", points: 5, label: "AI/ML"}
+    - {pattern: "robot|autonom|perception|computer vision|\\bvision\\b", points: 5, label: "robotics/vision"}
+    - {pattern: "mobile|react native|\\bios\\b|android", points: 4, label: "mobile"}
+  favorite_companies:
+    points: 20
+    names: []            # e.g. ["Shopify", "Cohere", "Stripe"]
+
+# --- Fit to your resume ------------------------------------------------------------
+# Stage 2 (no model): reads each shortlisted posting and rules out what you can't get
+# (graduate-only, 3+ years, wrong graduation window, citizenship/clearance, no sponsorship
+# when you need it, GPA floor) and scores skill overlap with your resume.
+fit:
+  shortlist: 50          # postings from stage 1 that get read
+  skill_points: 30       # points for having every skill a posting lists
+  max_years_required: 2  # rule out postings asking for more years than this
+
+# Stage 3 (Claude, your login): screens the best few. Every "you meet this" must quote your
+# resume and the posting; the server checks each quote and scores only what it verified.
+screen:
+  enabled: true
+  top: 15                # how many to screen per day (results are cached per posting)
+  weight: 40             # points for a 100/100 verified fit
+  min_fit: 30            # below this verified fit, a posting is ruled out as a long shot
+  effort: low
+
+reach_companies: []      # e.g. ["Jane Street", "Google"] - counted as reach roles
+max_reach_per_day: 1     # at most this many stretch/reach roles in a day's batch
+max_outside_canada_per_day: 1   # mainly Canada: at most this many non-Canadian jobs a day (null = no cap)
+
+# Optional: Claude searches the web each morning for postings the feeds missed. A link is kept
+# only if the job board's own API confirms it's live; all details come from that API.
+discover:
+  enabled: false
+  budget_usd: 1.0        # hard cap per search (claude --max-budget-usd)
+  max_results: 15
+
+server:
+  daily_at: "07:30"      # when the home server builds the day's list
+  port: 8765             # local port; reach it from your Mac via tailscale serve on 8443
+  allowed_logins: []     # tailnet logins allowed in; empty = this machine's owner
+
+drafts:
+  backend: auto          # auto | api | claude-cli | none
+  model: claude-opus-5-5
+  effort: medium         # low | medium | high
+  parallel: 3            # jobs drafted at once
+  timeout_seconds: 600
+
+browser:
+  channel: msedge        # msedge | chrome | "" (bundled Chromium; run `playwright install chromium`)
+
+# Employers polled directly every morning (their own job boards, newest postings first-hand).
+# 136 boards, each verified against its public API on 2026-10-25; the number is Canadian
+# intern/co-op postings open that day. Add more with: - {company: X, ats: greenhouse|lever|ashby|workday|smartrecruiters, id: ...}
+boards:
+  - {company: "Aptiv", ats: workday, id: "aptiv.wd5/aptiv_careers"}   # 22 in Canada
+  - {company: "1Password", ats: ashby, id: "1password"}   # 15 in Canada
+  - {company: "Lyft", ats: greenhouse, id: "lyft"}   # 12 in Canada
+  - {company: "CIBC", ats: workday, id: "cibc.wd3/search"}   # 16 in Canada
+  - {company: "Marvell", ats: workday, id: "marvell.wd1/MarvellCareers"}   # 13 in Canada
+  - {company: "Altera", ats: workday, id: "altera.wd1/altera"}   # 6 in Canada
+  - {company: "Magna", ats: workday, id: "magna.wd3/Magna"}   # 13 in Canada
+  - {company: "RTX (Pratt & Whitney Canada / Collins)", ats: workday, id: "globalhr.wd5/REC_RTX_Ext_Gateway"}   # 49 in Canada
+  - {company: "Kepler Communications", ats: lever, id: "kepler"}   # 4 in Canada
+  - {company: "Ciena", ats: workday, id: "ciena.wd5/Careers"}   # 7 in Canada
+  - {company: "Cohere", ats: ashby, id: "cohere"}   # 3 in Canada
+  - {company: "Stripe", ats: greenhouse, id: "stripe"}   # 3 in Canada
+  - {company: "Intel", ats: workday, id: "intel.wd1/External"}   # 3 in Canada
+  - {company: "Waabi", ats: lever, id: "waabi"}   # 3 in Canada
+  - {company: "Pinterest", ats: greenhouse, id: "pinterest"}   # 2 in Canada
+  - {company: "Later", ats: greenhouse, id: "later"}   # 2 in Canada
+  - {company: "Tower Research Capital", ats: greenhouse, id: "towerresearchcapital"}   # 2 in Canada
+  - {company: "DRW", ats: greenhouse, id: "drweng"}   # 2 in Canada
+  - {company: "Thomson Reuters", ats: workday, id: "thomsonreuters.wd5/External_Career_Site"}   # 2 in Canada
+  - {company: "NVIDIA", ats: workday, id: "nvidia.wd5/NVIDIAExternalCareerSite"}   # 2 in Canada
+  - {company: "Manulife", ats: workday, id: "manulife.wd3/MFCJH_Jobs"}   # 11 in Canada
+  - {company: "CAE", ats: workday, id: "cae.wd3/career"}   # 5 in Canada
+  - {company: "Rockwell Automation (OTTO / Clearpath)", ats: workday, id: "rockwellautomation.wd1/External_Rockwell_Automation"}   # 3 in Canada
+  - {company: "GE Vernova", ats: workday, id: "gevernova.wd5/Vernova_ExternalSite"}   # 5 in Canada
+  - {company: "Magnet Forensics", ats: lever, id: "magnetforensics"}   # 2 in Canada
+  - {company: "Clio", ats: workday, id: "clio.wd3/ClioCareerSite"}   # 1 in Canada
+  - {company: "Databricks", ats: greenhouse, id: "databricks"}   # 1 in Canada
+  - {company: "Block (Square)", ats: greenhouse, id: "block"}   # 1 in Canada
+  - {company: "Fullscript", ats: lever, id: "fullscript"}   # 1 in Canada
+  - {company: "Epic Games", ats: greenhouse, id: "epicgames"}   # 1 in Canada
+  - {company: "Squarepoint Capital", ats: greenhouse, id: "squarepointcapital"}   # 1 in Canada
+  - {company: "Desjardins", ats: workday, id: "desjardins.wd10/Desjardins"}   # 3 in Canada
+  - {company: "TD", ats: workday, id: "td.wd3/TD_Bank_Careers"}   # 5 in Canada
+  - {company: "Bosch", ats: smartrecruiters, id: "BoschGroup"}   # 2 in Canada
+  - {company: "BMO", ats: workday, id: "bmo.wd3/External"}   # 5 in Canada
+  - {company: "Wealthsimple", ats: ashby, id: "wealthsimple"}   # 1 in Canada
+  - {company: "Sun Life (Campus)", ats: workday, id: "sunlife.wd3/Campus"}   # 3 in Canada
+  - {company: "Intact Financial", ats: workday, id: "intactfc.wd3/intactfc"}   # 2 in Canada
+  - {company: "Canadian Tire", ats: workday, id: "canadiantirecorporation.wd3/Enterprise_External_Careers_Site"}   # 2 in Canada
+  - {company: "Clutch", ats: greenhouse, id: "clutch"}   # 1 in Canada
+  - {company: "Interac", ats: workday, id: "interac.wd3/Interac"}   # 4 in Canada
+  - {company: "S&P Global", ats: workday, id: "spgi.wd5/SPGI_Careers"}   # 1 in Canada
+  - {company: "Analog Devices", ats: workday, id: "analogdevices.wd1/External"}   # 1 in Canada
+  - {company: "Cadence", ats: workday, id: "cadence.wd1/External_Careers"}   # 1 in Canada
+  - {company: "HPE", ats: workday, id: "hpe.wd5/Jobsathpe"}   # 1 in Canada
+  - {company: "Capital One Canada", ats: workday, id: "capitalone.wd12/Capital_One"}   # 2 in Canada
+  - {company: "RBC", ats: workday, id: "rbc.wd3/RBCGLOBAL1"}   # 30 in Canada
+  - {company: "TMX Group", ats: workday, id: "tmx.wd3/TMX_Careers"}   # 1 in Canada
+  - {company: "General Motors", ats: workday, id: "generalmotors.wd5/Careers_GM"}   # 1 in Canada
+  - {company: "Ubisoft", ats: smartrecruiters, id: "Ubisoft2"}   # 0 in Canada
+  - {company: "Affirm", ats: greenhouse, id: "affirm"}   # 0 in Canada
+  - {company: "Okta", ats: greenhouse, id: "okta"}   # 0 in Canada
+  - {company: "Lightspeed", ats: ashby, id: "lightspeedhq"}   # 0 in Canada
+  - {company: "Neo Financial", ats: ashby, id: "neofinancial"}   # 0 in Canada
+  - {company: "PointClickCare", ats: lever, id: "pointclickcare"}   # 0 in Canada
+  - {company: "Telesat", ats: lever, id: "telesat"}   # 0 in Canada
+  - {company: "Cerebras", ats: ashby, id: "cerebras"}   # 0 in Canada
+  - {company: "StackAdapt", ats: greenhouse, id: "stackadapt"}   # 0 in Canada
+  - {company: "Jobber", ats: ashby, id: "jobber"}   # 0 in Canada
+  - {company: "Instacart", ats: greenhouse, id: "instacart"}   # 0 in Canada
+  - {company: "Tenstorrent", ats: greenhouse, id: "tenstorrent"}   # 0 in Canada
+  - {company: "Samsara", ats: greenhouse, id: "samsara"}   # 0 in Canada
+  - {company: "Docebo", ats: ashby, id: "docebo"}   # 0 in Canada
+  - {company: "Kraken", ats: ashby, id: "kraken.com"}   # 0 in Canada
+  - {company: "Jane App", ats: ashby, id: "jane"}   # 0 in Canada
+  - {company: "Ramp", ats: ashby, id: "ramp"}   # 0 in Canada
+  - {company: "Unity", ats: workday, id: "unitytech.wd1/Unity"}   # 0 in Canada
+  - {company: "Float", ats: ashby, id: "float"}   # 0 in Canada
+  - {company: "Asana", ats: greenhouse, id: "asana"}   # 0 in Canada
+  - {company: "MongoDB", ats: greenhouse, id: "mongodb"}   # 0 in Canada
+  - {company: "Geotab", ats: greenhouse, id: "geotab"}   # 0 in Canada
+  - {company: "Benevity", ats: ashby, id: "benevity"}   # 0 in Canada
+  - {company: "ServiceNow", ats: smartrecruiters, id: "ServiceNow"}   # 0 in Canada
+  - {company: "Robinhood", ats: greenhouse, id: "robinhood"}   # 0 in Canada
+  - {company: "Mozilla", ats: greenhouse, id: "mozilla"}   # 0 in Canada
+  - {company: "Trulioo", ats: ashby, id: "trulioo"}   # 0 in Canada
+  - {company: "BlackBerry / QNX", ats: workday, id: "bb.wd3/BlackBerry"}   # 0 in Canada
+  - {company: "Miovision", ats: ashby, id: "miovision"}   # 0 in Canada
+  - {company: "Lightmatter", ats: greenhouse, id: "lightmatter"}   # 0 in Canada
+  - {company: "Achievers", ats: lever, id: "achievers"}   # 0 in Canada
+  - {company: "Arctic Wolf", ats: workday, id: "arcticwolf.wd1/External"}   # 0 in Canada
+  - {company: "Faire", ats: greenhouse, id: "faire"}   # 0 in Canada
+  - {company: "Zynga", ats: greenhouse, id: "zyngacareers"}   # 0 in Canada
+  - {company: "Maple", ats: lever, id: "getmaple"}   # 0 in Canada
+  - {company: "Loopio", ats: ashby, id: "loopio"}   # 0 in Canada
+  - {company: "Auvik", ats: greenhouse, id: "auviknetworks"}   # 0 in Canada
+  - {company: "Reddit", ats: greenhouse, id: "reddit"}   # 0 in Canada
+  - {company: "Airbnb", ats: greenhouse, id: "airbnb"}   # 0 in Canada
+  - {company: "Procurify", ats: ashby, id: "procurify"}   # 0 in Canada
+  - {company: "Snowflake", ats: ashby, id: "snowflake"}   # 0 in Canada
+  - {company: "Shakepay", ats: greenhouse, id: "shakepay"}   # 0 in Canada
+  - {company: "KOHO", ats: ashby, id: "koho"}   # 0 in Canada
+  - {company: "D2L", ats: greenhouse, id: "d2l"}   # 0 in Canada
+  - {company: "Wave", ats: lever, id: "waveapps"}   # 0 in Canada
+  - {company: "Coinbase", ats: greenhouse, id: "coinbase"}   # 0 in Canada
+  - {company: "Klue", ats: ashby, id: "klue"}   # 0 in Canada
+  - {company: "Hopper", ats: ashby, id: "hopper"}   # 0 in Canada
+  - {company: "Clearco", ats: ashby, id: "clearco"}   # 0 in Canada
+  - {company: "Ada", ats: greenhouse, id: "ada18"}   # 0 in Canada
+  - {company: "Workleap", ats: greenhouse, id: "workleap"}   # 0 in Canada
+  - {company: "Hootsuite", ats: smartrecruiters, id: "hootsuite"}   # 0 in Canada
+  - {company: "Gatik", ats: greenhouse, id: "gatikaiinc"}   # 0 in Canada
+  - {company: "League", ats: greenhouse, id: "leagueinc"}   # 0 in Canada
+  - {company: "Top Hat", ats: ashby, id: "top-hat"}   # 0 in Canada
+  - {company: "Thinkific", ats: ashby, id: "thinkific"}   # 0 in Canada
+  - {company: "Visier", ats: ashby, id: "visier"}   # 0 in Canada
+  - {company: "Rewind", ats: ashby, id: "rewind"}   # 0 in Canada
+  - {company: "Wattpad", ats: lever, id: "wattpad"}   # 0 in Canada
+  - {company: "Rockstar Games", ats: greenhouse, id: "rockstargames"}   # 0 in Canada
+  - {company: "Spotify", ats: lever, id: "spotify"}   # 0 in Canada
+  - {company: "Ideogram", ats: ashby, id: "ideogram"}   # 0 in Canada
+  - {company: "Deep Genomics", ats: lever, id: "deepgenomics"}   # 0 in Canada
+  - {company: "Unbounce", ats: greenhouse, id: "unbounce"}   # 0 in Canada
+  - {company: "DoorDash", ats: greenhouse, id: "doordashusa"}   # 0 in Canada
+  - {company: "d-Matrix", ats: ashby, id: "d-matrix"}   # 0 in Canada
+  - {company: "Citi", ats: workday, id: "citi.wd5/2"}   # 0 in Canada
+  - {company: "Sun Life (Experienced)", ats: workday, id: "sunlife.wd3/Experienced-Jobs"}   # 0 in Canada
+  - {company: "TELUS Health (LifeWorks)", ats: workday, id: "lifeworks.wd3/External"}   # 0 in Canada
+  - {company: "Thales", ats: workday, id: "thales.wd3/Careers"}   # 0 in Canada
+  - {company: "Mastercard", ats: workday, id: "mastercard.wd1/CorporateCareers"}   # 0 in Canada
+  - {company: "Salesforce", ats: workday, id: "salesforce.wd12/External_Career_Site"}   # 0 in Canada
+  - {company: "Autodesk", ats: workday, id: "autodesk.wd1/Ext"}   # 0 in Canada
+  - {company: "Motorola Solutions", ats: workday, id: "motorolasolutions.wd5/Careers"}   # 0 in Canada
+  - {company: "Moneris", ats: workday, id: "moneris.wd3/Moneris"}   # 0 in Canada
+  - {company: "Ontario Teachers' Pension Plan", ats: workday, id: "otppb.wd3/OntarioTeachers_Careers"}   # 0 in Canada
+  - {company: "Arista Networks", ats: smartrecruiters, id: "aristanetworks"}   # 0 in Canada
+  - {company: "Visa", ats: workday, id: "visa.wd5/Visa"}   # 0 in Canada
+  - {company: "Samsung", ats: workday, id: "sec.wd3/Samsung_Careers"}   # 0 in Canada
+  - {company: "Adobe", ats: workday, id: "adobe.wd5/external_experienced"}   # 0 in Canada
+  - {company: "ApplyBoard", ats: workday, id: "applyboard.wd3/ApplyBoardNH"}   # 0 in Canada
+  - {company: "Genetec", ats: smartrecruiters, id: "genetec"}   # 0 in Canada
+  - {company: "BlackRock", ats: workday, id: "blackrock.wd1/BlackRock_Professional"}   # 0 in Canada
+  - {company: "Maropost", ats: smartrecruiters, id: "maropost"}   # 0 in Canada
+  - {company: "Clearco (legacy SR)", ats: smartrecruiters, id: "clearbanc"}   # 0 in Canada
+  - {company: "BenchSci", ats: lever, id: "benchsci"}   # 0 in Canada
+  - {company: "Borealis AI (standalone board)", ats: greenhouse, id: "borealisai"}   # 0 in Canada
