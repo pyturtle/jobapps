@@ -63,3 +63,23 @@ def test_extension_zip_has_server_url(port):
     assert b"https://pc.tailnet.ts.net:8443" in z.read("jobapps-extension/config.js")
     manifest = json.loads(z.read("jobapps-extension/manifest.json"))
     assert manifest["host_permissions"][0] == "https://pc.tailnet.ts.net:8443/*"
+
+
+def post(port, path, body, headers=None):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    data = json.dumps(body).encode("utf-8")
+    req_headers = {"Host": f"127.0.0.1:{port}", "Content-Type": "application/json", **(headers or {})}
+    c.request("POST", path, data, headers=req_headers)
+    r = c.getresponse()
+    return r.status, r.read()
+
+
+def test_api_ext_status_validation(port):
+    status, body = post(port, "/api/ext/status", {"status": "unknown_status", "url": "https://example.com/job"})
+    assert status == 400
+    assert json.loads(body) == {"error": "bad status"}
+
+    for s in ("applied", "skipped", "closed", "pending"):
+        status, body = post(port, "/api/ext/status", {"status": s, "url": "https://example.com/job"})
+        assert status == 200
+        assert json.loads(body) == {"ok": True}

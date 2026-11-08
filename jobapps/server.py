@@ -857,13 +857,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_ext_status(self):
         body = self._jbody()
+        status = body.get("status", "applied")
+        if status not in ("applied", "skipped", "closed", "pending"):
+            return self._json({"error": "bad status"}, 400)
         conn = db.connect()
         try:
             job = self._job_for(conn, body)
             if db.get_listing(conn, job["id"]) is None:  # a job you found yourself: keep it in your record
                 db.upsert_listings(conn, [{**job, "terms": [], "category": "", "sponsorship": "", "degrees": [],
                                            "date_posted": 0, "active": True}], deactivate_missing=False)
-            status = body.get("status", "applied")
             db.set_status(conn, job["id"], status, url=body.get("form_url") or body.get("frame_url") or body.get("url"))
         finally:
             conn.close()

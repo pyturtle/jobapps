@@ -101,3 +101,17 @@ def test_one_company_many_spellings():
     assert not company_keys("General Magic") & company_keys("GM")             # two letters never merge companies
     assert not company_keys("Uber") & company_keys("Disney")
     assert same_job_key("Hewlett Packard Enterprise", "Software Development Intern - AI-Assisted Development - Summer 2027")         == same_job_key("HPE", "Software Development Intern, AI-Assisted Development (Winter 2027)")
+
+
+def test_unknown_status_fallback(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    db.upsert_listings(conn, [listing("a", "Trimble", ["Toronto, ON"])], False)
+    conn.execute("INSERT INTO applications(job_id, status, updated_at) VALUES(?, ?, ?)",
+                 ("a", "custom_status", "2026-11-08 12:00:00"))
+    conn.commit()
+    res = records.postings(conn)
+    row = res["rows"][0]
+    assert row["status"] == "custom_status"
+    assert row["status_label"] == "custom_status"
+    csv_text = records.postings_csv(conn)
+    assert "custom_status" in csv_text

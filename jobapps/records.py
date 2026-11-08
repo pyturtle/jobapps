@@ -58,7 +58,7 @@ def _all(conn) -> list[dict]:
             "source": l["source"], "locations": locs, "canada": any(is_canadian(x) for x in locs),
             "first_seen": (l["first_seen"] or "")[:10], "last_seen": (l["last_seen"] or "")[:10],
             "posted": datetime.fromtimestamp(l["date_posted"]).date().isoformat() if l["date_posted"] else "",
-            "active": bool(l["active"]), "status": status, "status_label": LABEL[status],
+            "active": bool(l["active"]), "status": status, "status_label": LABEL.get(status, status),
             "listed_on": e.get("listed_on", ""), "how": e.get("how", ""), "done_at": (e.get("done_at") or "")[:16],
             "applied_url": e.get("applied_url", "") if status == "applied" else "",
             "reason": e.get("ruled_out", "") if status == "ruled_out" else "",
