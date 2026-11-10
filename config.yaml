@@ -1,10 +1,11 @@
 # What to look for and how to rank it. Every rule here is applied in a fixed order, so the
-# same listings on the same day always produce the same 5 picks. `ja explain N` shows the math.
+# same listings on the same day always produce the same picks. `ja explain N` shows the math.
 
-daily_count: 5          # jobs per day
+daily_count: 10         # jobs per day
 carry_over: true        # unfinished jobs stay on the list (apart from the day's new picks)...
 carry_days: 3           # ...for this many days; after that they're only under Postings -> On your list
-company_cooldown_days: 7  # skip companies you've had in the last week unless there aren't enough others
+company_cooldown_days: 30  # one application per company a month unless there aren't enough others: interview rates
+                           # fall with each extra application to the same company (Huntr 2026), and Google caps you at 3 per 30 days
 max_per_company: 1      # at most this many jobs from one company per batch
 
 # Public feeds, chosen after checking ~40 candidates on 2026-10-25 (download, parse, overlap with Simplify).
@@ -34,14 +35,19 @@ sources:
   #   url: https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json
 
 filters:
-  max_age_days: 21
+  max_age_days: 90       # big employers (Lyft, Amazon...) post in Aug-Sept and keep postings open for months;
+                         # 21 days hid most of them. Closed postings are still dropped by the live check.
+  stale_after_days: 21   # ...but ~55% of applications arrive in a posting's first 4 days, so past 3 weeks a
+                         # posting is only picked when Claude's verified fit is good (55+) or strong
   # Simplify categories to keep (listings without a category always pass this check)
   categories: ["Software", "Software Engineering", "AI/ML/Data", "Data Science, AI & Machine Learning", "Quant"]
   title_include:        # regexes; a title must match one
     - "software|developer|\\bswe\\b|\\bsde\\b|engineer"
     - "machine learning|\\bml\\b|\\bai\\b|data|research"
     - "backend|back-end|frontend|front-end|full[- ]?stack|platform|infrastructure|cloud|devops|security|quant"
-  title_exclude:        # regexes; any match drops the listing
+    - "artificial intelligence|gen ?ai\\b|computer (science|vision)|computing|robot|embedded|firmware|cyber|programm(er|ing)\\b|application development"
+    - "logiciel|d[ée]veloppe|informatique|donn[ée]es|programm(ation|eu[rs]e?)\\b|intelligence artificielle"   # French: "Stagiaire en développement logiciel"
+  title_exclude:       # regexes; any match drops the listing
     - "ph\\.?d|doctoral|\\bmba\\b|master'?s"
     - "mechanical|electrical|civil|chemical|manufacturing|hardware engineer|asic|fpga|rf\\b|analog|silicon"
     - "sales|marketing|account(ing|ant)|recruit|legal|\\bhr\\b|human resources|supply chain"
@@ -50,13 +56,13 @@ filters:
   exclude_sponsorship: ["U.S. Citizenship is Required"]
   location_include: []                # empty = anywhere not excluded below
   location_exclude:
-    - "\\bUK\\b|United Kingdom|London|Ireland|Germany|France|Netherlands|Poland|Spain|Switzerland|Israel"
-    - "India|Singapore|China|Japan|Korea|Taiwan|Hong Kong|Australia|Brazil|Mexico"
+    - "\\bUK\\b|United Kingdom|London(?!, ?(ON|Ontario))|Ireland|Germany|France|Netherlands|Poland|Spain|Switzerland|Israel"
+    - "\\bIndia\\b|Singapore|China|Japan|Korea|Taiwan|Hong Kong|Australia|Brazil|(?<!New )Mexico"   # not Indianapolis or New Mexico
   exclude_companies: []
 
 scoring:
-  recency_max: 40        # brand-new posting gets 40 points...
-  recency_per_day: 2     # ...minus 2 per day since posting
+  recency_max: 30        # brand-new posting gets 30 points...
+  recency_per_day: 1     # ...minus 1 per day since posting (0 after a month)
   ats:                   # forms we can read ahead of time and fill reliably score higher
     greenhouse: 15
     lever: 15
@@ -74,9 +80,10 @@ scoring:
     Fall 2027: 2
     Winter 2027: -25
     Spring 2027: -25
-  locations:             # first matching rule wins, so keep these best-first
-    - {pattern: "toronto|markham|mississauga|waterloo(?!,\\s*(IA|Iowa))|oakville|vaughan|brampton|richmond hill", points: 30, label: "Toronto area"}
-    - {pattern: "canada|, (ON|BC|QC|AB)\\b|\\bCAN\\b", points: 24, label: "in Canada (no visa needed)"}
+  locations:             # first matching rule wins, so keep these best-first. `in: canada` is the same test the
+                         # daily cap below uses: "Montreal" and "CA-BC-VANCOUVER" count, "Waterloo, IA" doesn't
+    - {pattern: "toronto|markham|mississauga|waterloo|oakville|vaughan|brampton|richmond hill", in: canada, points: 30, label: "Toronto area"}
+    - {in: canada, points: 24, label: "in Canada (no visa needed)"}
     - {pattern: "remote", points: 4, label: "remote"}
   title_keywords:            # tune to your resume: the kinds of work you've already shipped
     - {pattern: "software|\\bswe\\b|developer", points: 5, label: "software role"}
@@ -93,7 +100,7 @@ scoring:
 # (graduate-only, 3+ years, wrong graduation window, citizenship/clearance, no sponsorship
 # when you need it, GPA floor) and scores skill overlap with your resume.
 fit:
-  shortlist: 50          # postings from stage 1 that get read
+  shortlist: 80          # postings from stage 1 that get read (at most 2 per company)
   skill_points: 30       # points for having every skill a posting lists
   max_years_required: 2  # rule out postings asking for more years than this
 
@@ -101,14 +108,24 @@ fit:
 # resume and the posting; the server checks each quote and scores only what it verified.
 screen:
   enabled: true
-  top: 15                # how many to screen per day (results are cached per posting)
+  top: 25                # how many to screen per day (results are cached per posting)
   weight: 40             # points for a 100/100 verified fit
   min_fit: 30            # below this verified fit, a posting is ruled out as a long shot
   effort: low
 
 reach_companies: []      # e.g. ["Jane Street", "Google"] - counted as reach roles
-max_reach_per_day: 1     # at most this many stretch/reach roles in a day's batch
-max_outside_canada_per_day: 1   # mainly Canada: at most this many non-Canadian jobs a day (null = no cap)
+max_reach_per_day: 2     # at most this many stretch/reach roles in a day's batch
+max_outside_canada_per_day: 1   # mainly Canada: US internships need sponsorship (a J-1) and the US big-tech cycle peaks Sep-Oct
+
+# Postings JobApps can't read itself (pages that need JavaScript or turn automated reads away) are looked
+# up by Claude, which points to pages carrying the same posting; JobApps reads those itself. Once per
+# posting, best-ranked first, at most max_per_day a day.
+research:
+  enabled: true
+  model: claude-sonnet-5-5   # finding pages is light work; ~30 s and a few cents per lookup
+  effort: low
+  budget_usd: 0.3        # hard cap per lookup
+  max_per_day: 6
 
 # Optional: Claude searches the web each morning for postings the feeds missed. A link is kept
 # only if the job board's own API confirms it's live; all details come from that API.
@@ -119,7 +136,7 @@ discover:
 
 server:
   daily_at: "07:30"      # when the home server builds the day's list
-  port: 8765             # local port; reach it from your Mac via tailscale serve on 8443
+  port: 8765             # local port; your other devices reach it through tailscale serve on 8443
   allowed_logins: []     # tailnet logins allowed in; empty = this machine's owner
 
 drafts:

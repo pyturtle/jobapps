@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import gzip
+import http.client
 import json
 import time
 import urllib.error
 import urllib.request
+import zlib
 from typing import Any
 
 UA = (
@@ -42,7 +44,8 @@ def request(url: str, *, data: Any = None, headers: dict | None = None,
                 time.sleep(2 ** attempt)
                 continue
             raise HttpError(exc.code, url) from None
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        except (OSError, http.client.HTTPException, EOFError, zlib.error) as exc:
+            # no connection, a timeout, a bad certificate, a reply cut short, or a body that isn't the gzip it claims to be
             if attempt < retries:
                 time.sleep(2 ** attempt)
                 continue

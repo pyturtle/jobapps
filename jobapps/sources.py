@@ -78,6 +78,25 @@ def url_key(url: str) -> str:
     return host + path + (f"?{p.query}" if p.query else "")
 
 
+def posting_keys(url: str) -> set[str]:
+    """Every identity one posting's pages share, for telling which job a page belongs to. Besides url_key: the job
+    number a career site keeps when it hands you to its ATS (careers.x.com/jobs/91359?icims=1 and
+    x.icims.com/jobs/91359/...; x.eightfold.ai/careers/job/446721828828 and careers.x.com/careers/apply?pid=446721828828)
+    and Workable's two spellings (/x/j/9B3CB646E8 and /j/9B3CB646E8)."""
+    keys = {url_key(url)}
+    p = urlparse(url)
+    query = dict(parse_qsl(p.query))
+    if m := re.search(r"workable\.com/(?:[\w-]+/)?j/([0-9a-f]{6,})", url, re.I):
+        keys.add(f"workable:{m.group(1).upper()}")
+    if m := re.search(r"/careers/job/(\d{6,})", p.path):
+        keys.add(f"eightfold:{m.group(1)}")
+    if query.get("pid", "").isdigit():
+        keys.add(f"eightfold:{query['pid']}")
+    if (".icims.com" in p.netloc.lower() or "icims" in query) and (m := re.search(r"/jobs/(\d+)", p.path)):
+        keys.add(f"icims:{m.group(1)}")
+    return keys
+
+
 def listing_id(url: str) -> str:
     return hashlib.sha1(url_key(url).encode("utf-8")).hexdigest()[:10]
 
@@ -126,6 +145,7 @@ SHORT_LINK = re.compile(r"^https?://(?:go\.vansh\.nyc|bit\.ly|tinyurl\.com)/", r
 
 
 def _redirect_target(url: str) -> str | None:
+    import http.client
     import urllib.error
     import urllib.request
 
@@ -139,7 +159,7 @@ def _redirect_target(url: str) -> str | None:
             return resp.headers.get("Location")
     except urllib.error.HTTPError as exc:
         return exc.headers.get("Location") if 300 <= exc.code < 400 else None
-    except (urllib.error.URLError, TimeoutError, ConnectionError, ValueError):
+    except (OSError, http.client.HTTPException, ValueError):
         return None
 
 
@@ -176,6 +196,13 @@ def _item(company: str, title: str, url: str, location: str, posted: int, terms:
 def _canada(location: str) -> str:
     from jobapps.rules import is_canadian
     return location if is_canadian(location) else f"{location}, Canada".lstrip(", ")
+
+
+def _days_ago(days: int, today=None) -> int:
+    """The start of the day `days` ago, in unix seconds. A site that only says "3 days ago" gives every posting
+    from that day the same date, so their order doesn't depend on the second each board was read."""
+    from datetime import date, datetime, timedelta
+    return int(datetime.combine((today or date.today()) - timedelta(days=days), datetime.min.time()).timestamp())
 
 
 def parse_francklin(md: str) -> list[dict]:
@@ -222,7 +249,6 @@ def parse_dreamwork(data: dict, country: str = "CA") -> list[dict]:
 
 def parse_speedyapply(md: str, country: str = "Canada") -> list[dict]:
     """speedyapply INTERN_INTL.md tables: | Company | Position | Location | (Salary) | Posting | Age |"""
-    import time
     out, header = [], None
     for line in md.splitlines():
         if line.startswith("| Company"):
@@ -239,7 +265,7 @@ def parse_speedyapply(md: str, country: str = "Canada") -> list[dict]:
         if (country and country.lower() not in location.lower()) or not link:
             continue
         age = re.match(r"(\d+)\s*d", _strip(row.get("age", "")))
-        posted = int(time.time()) - int(age.group(1)) * 86400 if age else 0
+        posted = _days_ago(int(age.group(1))) if age else 0
         title = _strip(row.get("position", ""))
         out.append(_item(_strip(row.get("company", "")), title, unescape(link.group(1)), location, posted,
                          _terms_from_title(title)))
@@ -270,12 +296,12 @@ def _terms_from_title(title: str) -> list[str]:
     return list(dict.fromkeys(f"{s.title().replace('Autumn', 'Fall')} {y}" for s, y in _TERM.findall(title)))
 
 
-def _ago(text: str) -> int:
-    """Workday's 'Posted 3 Days Ago' -> unix seconds."""
-    import time
+def _ago(text: str, today=None) -> int:
+    """Workday's 'Posted 3 Days Ago' -> unix seconds. 'Posted 30+ Days Ago' is all it says about anything older;
+    db.upsert_listings keeps the first date a listing was given, so those age from the day they were first seen."""
     t = (text or "").lower()
     days = 0 if "today" in t else 1 if "yesterday" in t else int(m.group(1)) if (m := re.search(r"(\d+)\+?\s*day", t)) else 30
-    return int(time.time()) - days * 86400
+    return _days_ago(days, today)
 
 
 def _board_listing(company: str, title: str, url: str, locations: list[str], posted: int, source: str) -> dict:

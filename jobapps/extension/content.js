@@ -10,7 +10,9 @@
   // location suggestions, Google Places.
   const OPTION_SEL = '[role="option"], [id*="-option-"], .select__option, .dropdown-location, .pac-item';
   const PLACEHOLDER_OPTION = /^(no options|no results|no matches|loading|searching|type to search)/i;
-  const SUBMITTED = /thank(s| you) for (applying|your application|submitting)|application (was |has been )?(successfully )?(submitted|received|sent|complete)|we('ve| have) received your application|your application (is|was|has been) (in|submitted|received)/i;
+  // A page that says the application went in. The same two patterns as jobapps/plan.py (a test keeps them identical).
+  const SUBMITTED = /thank(s| you) for (applying|your application|submitting)|application (was |has been )?(successfully )?(submitted|received|sent|completed?)\b|we('ve| have) received your application|your application (is|was|has been) (in *[.!]|submitted\b|received\b)/gi;
+  const NOT_YET = /\b(once|after|when|if|until|before|as soon as|whether)\b[^.!?\n]*(?![\s\S])/i;
   const inFrame = window.top !== window;
   const J = () => window.__jobapps;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -49,7 +51,24 @@
     });
   }
 
-  const ctx = () => ({ url: location.href, frame_url: location.href, title: document.title, job_id: job && job.id });
+  // The job this tab was working on before this page (see background.js): an application that continues on another
+  // page or site stays with its job instead of becoming a page you found yourself.
+  let tabJobId = null;
+  let tabJobAge = Infinity;
+  function askBackground(msg) {
+    return new Promise((resolve) => {
+      try { chrome.runtime.sendMessage(msg, (r) => resolve(chrome.runtime.lastError ? null : r)); } catch (e) { resolve(null); }
+    });
+  }
+  async function loadTabJob() {
+    const r = await askBackground({ type: 'tab-job', host: location.host });
+    if (r && r.jobId) { tabJobId = r.jobId; tabJobAge = r.age ?? Infinity; }
+  }
+  function keepTabJob(j) {
+    if (j && j.in_batch) askBackground({ type: 'tab-job-set', job: { id: j.id, company: j.company }, host: location.host });
+  }
+
+  const ctx = () => ({ url: location.href, frame_url: location.href, title: document.title, job_id: (job && job.id) || tabJobId });
 
   // ------------------------------------------------------------- typing
 
@@ -556,19 +575,27 @@
     === JSON.stringify([].concat(b).map((x) => String(x).trim().toLowerCase()).sort());
   const hasValue = (v) => (Array.isArray(v) ? v.length > 0 : typeof v === 'boolean' ? v : String(v ?? '').trim() !== '');
 
+  // Some pages reuse a box for a different question (Oracle re-renders its address form in place: the box that asked
+  // Postal Code now asks City). What you type there answers the question it asks now, never the one JobApps filled.
+  const qnorm = (s) => String(s || '').toLowerCase().replace(/[✱*]+|\((required|optional)\)/g, ' ').replace(/\s+/g, ' ').trim();
+  const reused = (x, now) => !!(x && x.field && now && (qnorm(x.field.label) !== qnorm(now.label) || x.field.type !== now.type));
+  const scanNow = () => new Map((J() ? J().scan() : []).map((f) => [f.id, f]));
+  function forget(id) { handled.delete(id); assisted.delete(id); userValues.delete(id); }
+
   function learnable() {
     const entries = [];
     const edited = [];
+    const now = scanNow();
     for (const [id, value] of userValues) {
       const x = handled.get(id);
-      if (!x || !hasValue(value)) continue;
+      if (!x || !hasValue(value) || reused(x, now.get(id))) continue;
       const f = x.field;
       if (x.action.state === 'draft') {
         if (String(value).trim() !== String(x.typed || '').trim()) edited.push({ label: f.label, answer: String(value) });
         continue;
       }
       if (f.type === 'file' || f.type === 'textarea' || !f.label) continue;
-      if (f.section && /\d\s*$/.test(f.section)) continue;  // "From" in Work Experience 2 means nothing on its own
+      if (f.section) continue;  // "From" in Work Experience 2 or "Name" under References means nothing on its own
       if (x.typed != null && same(value, x.typed)) continue;
       if (String(value).length > 200) continue;
       entries.push({ label: f.label, answer: value, type: f.type });
@@ -606,20 +633,26 @@
   function rememberable(x, value) {
     const f = x.field || {};
     return hasValue(value) && f.label && !['file', 'textarea'].includes(f.type) && String(value).length <= 200
-      && !(f.section && /\d\s*$/.test(f.section)) && x.action.rule !== 'draft';
+      && !f.section && x.action.rule !== 'draft';
   }
   function remember(id, value) {
     clearTimeout(rememberTimers.get(id));
     rememberTimers.set(id, setTimeout(async () => {
       const x = handled.get(id);
       if (!x || !rememberable(x, value)) return;
+      if (reused(x, scanNow().get(id))) { forget(id); run(); return; }  // a new question in that box: plan it instead
       try {
         const r = await send('/api/ext/learn', { ...ctx(), entries: [{ label: x.field.label, answer: value, type: x.field.type, rule: x.action.rule }] });
+        const where = (r.where || [])[0] || '';
         x.state = 'filled';
         x.typed = value;
-        x.action.note = (r.where || [])[0] && r.where[0].startsWith('profile') ? 'saved to your profile' : 'remembered for next time';
+        if (where === 'not stored') {  // a legal or consent question, or one your profile already answers
+          x.action.note = 'answered by you';
+        } else {
+          x.action.note = where.startsWith('profile') ? 'saved to your profile' : 'remembered for next time';
+          note = `Remembered “${x.field.label.slice(0, 60)}” for next time.`;
+        }
         J().mark(id, 'filled', x.action.note);
-        note = `Remembered “${x.field.label.slice(0, 60)}” for next time.`;
         render();
       } catch (e) { /* kept locally and sent when you press "I submitted it" */ }
     }, 1200));
@@ -648,7 +681,9 @@
       for (const id of [...handled.keys()]) {  // forget fields the page has since removed or re-rendered
         if (!document.querySelector(`[${ATTR}="${id}"]`)) { handled.delete(id); assisted.delete(id); }
       }
-      const fields = J().scan().filter((f) => !handled.has(f.id));
+      const scanned = J().scan();
+      for (const f of scanned) if (reused(handled.get(f.id), f)) forget(f.id);  // same box, new question: plan it afresh
+      const fields = scanned.filter((f) => !handled.has(f.id));
       if (fields.length && job && (force || job.in_batch)) formUrl = location.href;  // the form you filled, not the thank-you page
       if (pageUrl !== location.href) { pageUrl = location.href; announcedFor = ''; offeredFields = -1; }  // single-page apps change pages in place
       if (!fields.length) {
@@ -660,6 +695,7 @@
       let plan = await send('/api/ext/plan', { ...ctx(), fields });
       const first = !job;
       job = plan.job;
+      keepTabJob(job);
       seconds = Math.max(seconds, job.seconds || 0);
       if (first) tick();  // start the clock now rather than in 30 s
       if (!force && !job.in_batch) { offer(plan, fields); return; }  // only today's jobs fill by themselves
@@ -749,6 +785,7 @@
     const p = await send('/api/ext/plan', { ...ctx(), fields: [] }).catch(() => null);
     if (!p) return;
     job = p.job;
+    keepTabJob(job);
     if (job.in_batch && !handled.size && !dismissed) {
       J().panel({ title: job.company, subtitle: job.title, compact: true, inFrame,
         note: 'On today’s list. Press Apply: JobApps fills each page of the application as it appears.' });
@@ -774,12 +811,28 @@
     });
   }
 
-  function submittedNow() {
-    const text = (document.body && document.body.innerText.slice(0, 20000)) || '';
-    return SUBMITTED.test(text) && J() && J().count() <= 2;
+  // "Your application is incomplete" doesn't say so, and neither does a sentence about later ("Once your
+  // application has been submitted, we will...").
+  function saysSubmitted(text) {
+    for (const m of text.matchAll(SUBMITTED)) {
+      if (!NOT_YET.test(text.slice(Math.max(0, m.index - 80), m.index))) return true;
+    }
+    return false;
   }
 
+  function submittedNow() {
+    const text = (document.body && document.body.innerText.slice(0, 20000)) || '';
+    return saysSubmitted(text) && J() && J().count() <= 2;
+  }
+
+  // A "submitted" page counts for one of today's jobs, and, when only this tab ties it to the job (Workday's
+  // candidate home after you submit), only right after you were on its application: candidate home also lists
+  // applications you sent days ago.
+  const SETTLE_MS = 15 * 60 * 1000;
+  const settles = (j) => j && j.in_batch && (j.id !== tabJobId || tabJobAge < SETTLE_MS || force);
+
   async function start() {
+    await loadTabJob();
     // Wait for single-page apps to render their form (field count stable for a moment).
     let last = -1;
     for (let i = 0; i < 20; i++) {
@@ -791,7 +844,7 @@
     if (submittedNow()) {
       // e.g. Lever's /thanks page: settle up for the application this tab just submitted
       const plan = await send('/api/ext/plan', { ...ctx(), fields: [] }).catch(() => null);
-      if (plan && plan.job && plan.job.in_batch) { job = plan.job; finish('applied'); }
+      if (plan && settles(plan.job)) { job = plan.job; finish('applied'); }
       return;
     }
     await run();
@@ -802,7 +855,8 @@
       clearTimeout(timer);
       timer = setTimeout(() => {
         if (done) return;
-        if (job && submittedNow()) { finish('applied'); return; }
+        // not for a page you found yourself unless you asked JobApps to fill it (it read candidate homes as new applications)
+        if ((force ? job : settles(job)) && submittedNow()) { finish('applied'); return; }
         if (force || (job ? job.in_batch || !dismissed : !inFrame)) run();  // offers re-check as forms appear
       }, 1200);
     }).observe(document.documentElement, { childList: true, subtree: true });

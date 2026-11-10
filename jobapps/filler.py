@@ -19,17 +19,12 @@ from playwright.sync_api import sync_playwright
 
 from jobapps import db, drafts
 from jobapps.config import BROWSER_PROFILE_DIR, Profile, load_learned, save_learned
-from jobapps.plan import has_value, text_for, to_field
-from jobapps.rules import Resolution, Resolver, candidates, choose_option, display, norm, qkey
+from jobapps.plan import SUBMITTED_PATH, has_value, says_submitted, text_for, to_field
+from jobapps.rules import Resolution, Resolver, authoritative, candidates, choose_option, display, is_consent, norm, qkey
 
 JS = Path(__file__).with_name("filler.js").read_text(encoding="utf-8")
 JS_FN = "() => {\n" + JS + "\n}"
 
-SUBMITTED_TEXT = re.compile(
-    r"thank(s| you) for (applying|your application|submitting)|application (was |has been )?(successfully )?"
-    r"(submitted|received|sent|complete)|we('ve| have) received your application|your application (is|was|has been) "
-    r"(in|submitted|received)", re.I)
-SUBMITTED_URL = re.compile(r"confirm|thank|submitted|success", re.I)
 # Dropdown options across widget libraries (ARIA listboxes, react-select, Greenhouse's select).
 OPTION_SEL = ", ".join(f"{s}:visible" for s in ('[role="option"]', '[id*="-option-"]', ".select__option"))
 _PLACEHOLDER_OPTION = re.compile(r"^(no options|no results|loading|searching|type to search)", re.I)
@@ -79,8 +74,7 @@ class FillSession:
         self.drafted_live = False
 
     def _drafts(self) -> dict[str, str]:
-        return {k: v["final_answer"] or v["answer"] for k, v in db.answers_for(self.conn, self.job["id"]).items()
-                if v["final_answer"] or v["answer"]}
+        return db.current_answers(db.answers_for(self.conn, self.job["id"]))
 
     # --- page plumbing ------------------------------------------------------
 
@@ -264,13 +258,13 @@ class FillSession:
     # --- submission & learning ---------------------------------------------
 
     def submitted(self) -> bool:
+        """The form is gone, and the address or the page says the application went in."""
         try:
             url = self.page.url
-            if url != self.start_url and SUBMITTED_URL.search(urlparse(url).path):
-                return True
+            moved = url != self.start_url and bool(SUBMITTED_PATH.search(urlparse(url).path))
             for frame in self.page.frames:
                 text = frame.evaluate("() => document.body ? document.body.innerText.slice(0, 20000) : ''")
-                if SUBMITTED_TEXT.search(text):
+                if (moved and frame == self.page.main_frame) or says_submitted(text):
                     remaining = frame.evaluate("() => window.__jobapps ? window.__jobapps.count() : 0")
                     if remaining <= 2:
                         return True
@@ -288,10 +282,12 @@ class FillSession:
             f, res, _ = entry
             if res.kind == "draft":
                 if str(value).strip() and str(value).strip() != str(res.value or "").strip():
-                    db.save_final_answer(self.conn, self.job["id"], qkey(f["label"]), str(value).strip())
+                    db.save_final_answer(self.conn, self.job["id"], qkey(f["label"]), str(value).strip(), f["label"])
                 continue
             if f["type"] in ("file", "textarea") or not f.get("label"):
                 continue
+            if authoritative(res.source) or is_consent(f["label"]):
+                continue  # answered on each form, never remembered
             if key in self.typed and _same(value, self.typed[key]):
                 continue  # still what we entered: nothing new to learn
             if len(str(value)) > 200:

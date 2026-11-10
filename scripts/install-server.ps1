@@ -9,17 +9,22 @@ $Port = 8765
 $HttpsPort = 8443
 $Tailscale = "C:\Program Files\Tailscale\tailscale.exe"
 
+if (-not (Test-Path $Tailscale)) {
+    $Found = Get-Command tailscale -ErrorAction SilentlyContinue
+    $Tailscale = if ($Found) { $Found.Source } else { $null }
+}
+
 if ($Remove) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    & $Tailscale serve --https=$HttpsPort off
+    if ($Tailscale) { & $Tailscale serve --https=$HttpsPort off }
     Write-Host "Removed the JobApps server task and its Tailscale serve rule."
     return
 }
 
 $Root = Split-Path -Parent $PSScriptRoot
 $Pythonw = Join-Path $Root ".venv\Scripts\pythonw.exe"
-if (-not (Test-Path $Pythonw)) { throw "Virtualenv not found at $Pythonw - see README > Setup." }
+if (-not (Test-Path $Pythonw)) { throw "Virtualenv not found at $Pythonw - see README > Install." }
 
 $Action = New-ScheduledTaskAction -Execute $Pythonw -Argument "-m jobapps serve" -WorkingDirectory $Root
 $AtLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -32,9 +37,15 @@ Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger @($AtLogon, 
     -Description "JobApps dashboard + daily job picks (http://127.0.0.1:$Port). Relaunched by a 5-minute watchdog." -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
 
+Write-Host ""
+if (-not $Tailscale) {
+    Write-Host "JobApps server installed. On this PC: http://127.0.0.1:$Port"
+    Write-Host "Tailscale isn't installed, so other devices can't reach it. Install Tailscale and run this script again."
+    Write-Host "Log: $Root\data\jobapps.log"
+    return
+}
 # Tailnet-only HTTPS on port $HttpsPort -> the local server. Other serve/funnel ports are left as they are.
 & $Tailscale serve --bg --https=$HttpsPort "http://127.0.0.1:$Port"
 $Dns = ((& $Tailscale status --json | ConvertFrom-Json).Self.DNSName).TrimEnd('.')
-Write-Host ""
-Write-Host "JobApps server installed. Open on your Mac: https://$Dns`:$HttpsPort"
+Write-Host "JobApps server installed. Open on your other devices: https://$Dns`:$HttpsPort"
 Write-Host "Log: $Root\data\jobapps.log"

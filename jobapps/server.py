@@ -15,7 +15,10 @@ import json
 import mimetypes
 import re
 import shutil
+import socket
+import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -29,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 from jobapps import config, db, drafts, fit, llm, pipeline, plan, records, sources
 from jobapps.config import ROOT, load_config, load_learned, load_profile, save_learned
 from jobapps.forms import Field
-from jobapps.rules import Resolver, authoritative, choose_option, display, month_year, qkey, rule_source
+from jobapps.rules import Resolver, authoritative, choose_option, display, is_consent, month_year, norm, qkey, rule_source
 
 WEB = Path(__file__).with_name("web")
 EXT = Path(__file__).with_name("extension")
@@ -62,15 +65,53 @@ PROFILE_TARGETS = {
     "preferences.referrer", "preferences.salary_expectation", "preferences.start_date", "preferences.end_date",
     "experience.current_company", "experience.current_title",
 }
+# What a typed answer must look like to be that profile value. A form that swapped the question under a box once saved
+# a city as the postal code and "Yes" as address line 2; an answer that can't be the value isn't kept anywhere.
+_PROFILE_SHAPE = {"address.postal_code": re.compile(r"(?=.*\d)[a-z0-9][a-z0-9 -]{2,9}", re.I),
+                  "phone": re.compile(r"(?:\D*\d){7,}\D*")}
+_YES_NO = re.compile(r"^(yes|no|y|n|true|false)$", re.I)
+
+
+def _fits_profile(rule: str, answer) -> bool:
+    if rule not in PROFILE_TARGETS or not isinstance(answer, str):
+        return True
+    value = answer.strip()
+    shape = _PROFILE_SHAPE.get(rule)
+    return not _YES_NO.match(value) and not (shape and not shape.fullmatch(value))
+
+
+# Labels naming a field inside a block (one job, one school) rather than a question: remembered, the answer for that
+# block would fill the same field of every other block ("Start Date Year" = when you started university).
+_BLOCK_LABEL = re.compile(r"^((start|end|from|to)( date)?( month| year)?|(employer|company)( name)?|current (role|job|position)"
+                          r"|(job )?title|description|responsibilities)$")
+# Not questions: a checkbox's own value, a radio option's label, a widget's placeholder.
+_NOT_A_QUESTION = re.compile(r"^(on|off|yes|no|true|false|custom|other|none|n/?a|select|select\.\.\.|choose|please select)$")
+
+
+def _same_answer(a, b) -> bool:
+    x, y = norm(display(a)), norm(display(b))
+    digits = lambda s: re.sub(r"\D", "", s)
+    return x == y or (len(digits(x)) >= 7 and digits(x) == digits(y))
 
 
 def remember(label: str, answer, rule: str = "", kind: str = "", source: str = "you") -> str:
     """Store an answer you gave: into profile.yaml when it's one of PROFILE_TARGETS, else learned_answers.yaml.
-    Returns where it went. Sponsorship / work-authorization / consent answers aren't stored (see
-    rules.AUTHORITATIVE), nor browser placeholders like "on"."""
+    Returns where it went. Not stored (see rules.AUTHORITATIVE): the legal questions your profile answers or that
+    depend on the job's country, consent, and someone else's details. Nor browser placeholders like "on", block
+    fields like "Start Date Year", or an answer your profile already gives (the profile stays the one place to
+    change it). `source` is the company whose form asked, or "you" from the dashboard."""
     if isinstance(answer, str) and answer.strip().lower() in ("on", "off"):
         return "not stored"
-    if authoritative(rule) or authoritative(rule_source(label, load_profile())):
+    if _BLOCK_LABEL.match(norm(label)) or _NOT_A_QUESTION.match(norm(label)) or _same_answer(answer, label):
+        return "not stored"
+    profile = load_profile()
+    asked_by = {"company": "" if source == "you" else source}
+    if authoritative(rule) or authoritative(rule_source(label, profile, asked_by)) or is_consent(label):
+        return "not stored"
+    known = Resolver(profile).resolve(Field(key="k", label=label, type=kind or "text"))
+    if known.kind == "fill" and known.source not in ("learned", "custom_answers") and _same_answer(known.value, answer):
+        return "not stored"
+    if not _fits_profile(rule, answer):
         return "not stored"
     # Only a typed answer becomes a profile value; a picked option ("Below $60,000") belongs to that one question.
     if rule in PROFILE_TARGETS and kind in ("text", "combobox", "") and isinstance(answer, str) and answer.strip():
@@ -90,15 +131,20 @@ def remember(label: str, answer, rule: str = "", kind: str = "", source: str = "
 
 
 def unanswered_items(fields: list[dict], actions: list[dict]) -> list[dict]:
-    """Questions on a page that JobApps left for you and has no answer for (not essays, uploads or consent boxes
-    you should read each time, and not fields inside repeated blocks like "Work Experience 2")."""
+    """Questions on a page that JobApps left for you and has no answer for, so you can answer them once. Not
+    essays or uploads, not what is answered on each form and never remembered (consent, the legal questions in
+    rules.AUTHORITATIVE, someone else's details), and not fields inside repeated blocks like "Work Experience 2"."""
     by_id = {f["id"]: f for f in fields}
     out = []
     for a in actions:
         f = by_id.get(a["id"]) or {}
         if a.get("state") not in ("missing", "manual") or a.get("op") or not a.get("label"):
             continue
-        if f.get("type") in ("file", "textarea") or a.get("rule") in ("draft", "consent", "captcha") or f.get("section"):
+        if f.get("type") in ("file", "textarea") or a.get("rule") in ("draft", "captcha") or f.get("section"):
+            continue
+        if authoritative(a.get("rule") or "") or is_consent(a["label"]):
+            continue
+        if _NOT_A_QUESTION.match(norm(a["label"])) or len(norm(a["label"])) < 3:
             continue
         if plan.has_value(f.get("value")):
             continue
@@ -132,15 +178,17 @@ class Runner:
         return True
 
     def _wrap(self, fn):
-        conn = db.connect()
-        try:
+        conn = None
+        try:  # opening the database is inside: if that fails, the runner must not stay "running" for good
+            conn = db.connect()
             fn(conn, load_config(), load_profile())
         except Exception as exc:  # surfaced in the dashboard instead of killing the thread
             self.last_error = f"{type(exc).__name__}: {exc}"
             self.log(f"! {self.last_error}")
             traceback.print_exc()
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
             self.last_finished = datetime.now().isoformat(timespec="seconds")
             self.running = False
             self.log(f"done: {self.task}")
@@ -157,7 +205,10 @@ def run_daily(more: int = 0, refresh: bool = False, rebuild: bool = False, backu
     def job(conn, cfg, profile):
         today = date.today()
         if backup:
-            db.backup(keep=7)
+            try:
+                db.backup(keep=7, files=(config.PROFILE_PATH, config.LEARNED_PATH, config.BACKGROUND_PATH))
+            except (OSError, sqlite3.Error) as exc:  # a full disk shouldn't cost you the day's list as well
+                RUNNER.log(f"! backup failed: {exc}")
         extra = more
         if rebuild:
             n = db.reset_new_picks(conn, today.isoformat())
@@ -207,8 +258,15 @@ def scheduler():
 
 # --- tailscale ------------------------------------------------------------------
 
+def tailscale_exe() -> str | None:
+    default = r"C:\Program Files\Tailscale\tailscale.exe"
+    return shutil.which("tailscale") or (default if Path(default).exists() else None)
+
+
 def tailscale_info() -> dict:
-    exe = shutil.which("tailscale") or r"C:\Program Files\Tailscale\tailscale.exe"
+    exe = tailscale_exe()
+    if not exe:
+        return {}
     try:
         out = subprocess.run([exe, "status", "--json"], capture_output=True, text=True, timeout=10,
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -223,14 +281,10 @@ def tailscale_info() -> dict:
 
 # --- view models ----------------------------------------------------------------
 
-def _drafts(answers: dict) -> dict[str, str]:
-    return {k: a["final_answer"] or a["answer"] for k, a in answers.items() if a["final_answer"] or a["answer"]}
-
-
 def _question(key: str, label: str, required: bool, limit: str, a: dict | None) -> dict:
     a = a or {}
-    return {"qkey": key, "label": label, "required": required, "limit": limit,
-            "answer": a.get("final_answer") or a.get("answer"), "edited": bool(a.get("final_answer")), "checks": a.get("checks")}
+    return {"qkey": key, "label": label, "required": required, "limit": limit, "answer": db.answer_text(a),
+            "edited": a.get("final_answer") is not None, "checks": a.get("checks")}
 
 
 def _prompt_text(path: str) -> str | None:
@@ -245,7 +299,7 @@ def job_view(conn, cfg, profile, learned, row: dict, today: date, day: str | Non
     form = db.get_form(conn, job["id"])
     answers = db.answers_for(conn, job["id"])
     pick = db.get_pick(conn, job["id"])
-    resolver = Resolver(profile, job, learned, _drafts(answers))
+    resolver = Resolver(profile, job, learned, db.current_answers(answers))
     questions, plan_rows = [], []
     readable = bool(form and form["ats"] != "page")
     for f in map(Field.from_dict, (form or {}).get("fields") or []):
@@ -349,7 +403,7 @@ def state(conn, day: str | None = None) -> dict:
         j["extra"] = j["how"] != "carried" and fresh > daily  # beyond the day's main list
     return {
         "date": view, "today": today.isoformat(), "preview": preview, "days": db.days(conn),
-        "daily_count": int(cfg["daily_count"]), "next_run": SCHEDULE["next_run"],
+        "daily_count": int(cfg["daily_count"]), "carry_days": int(cfg.get("carry_days", 3)), "next_run": SCHEDULE["next_run"],
         "jobs": jobs, "done": sum(1 for j in jobs if j["status"] != "pending"),
         "unanswered": len(db.unanswered(conn)),
         "excluded": json.loads(db.get_meta(conn, f"excluded:{view}") or "[]"),
@@ -365,26 +419,42 @@ def state(conn, day: str | None = None) -> dict:
 # --- extension support ------------------------------------------------------------
 
 def match_job(conn, urls: list[str]) -> dict | None:
-    today = date.today().isoformat()
-    for url in urls:
-        if not url or not url.startswith("http"):
-            continue
-        job = db.get_listing(conn, sources.listing_id(url))
-        if job:
-            return job
-    keys = {sources.url_key(u) for u in urls if u and u.startswith("http")}
-    for row in db.batch(conn, today):
+    """The posting a page belongs to. Today's list first: one posting can be in the record twice (two feeds, or the
+    career site and its ATS), and the copy on your list is the one you're applying to."""
+    urls = [u for u in urls if u and u.startswith("http")]
+    keys = set().union(*map(sources.posting_keys, urls)) if urls else set()
+    for row in db.batch(conn, date.today().isoformat()):
         form = db.get_form(conn, row["job_id"]) or {}
         job = db.get_listing(conn, row["job_id"])
-        if job and keys & {sources.url_key(job["url"]), sources.url_key(form.get("apply_url") or job["url"])}:
+        if job and keys & (sources.posting_keys(job["url"]) | sources.posting_keys(form.get("apply_url") or job["url"])):
+            return job
+    for url in urls:
+        if job := db.get_listing(conn, sources.listing_id(url)):
             return job
     return None
 
 
+_TITLE_NOISE = re.compile(r"^(candidate (home|profile)|submit application for|apply( now)?( for)?|application for)\s*[-:|]?\s*", re.I)
+
+
+def site_name(url: str) -> str:
+    """'careers.example.com' -> 'Example', 'campuscanada-acme.icims.com' -> 'Acme', 'apply.workable.com/botco/...'
+    -> 'Botco': who a page you found yourself belongs to (its title is often a step name like "Candidate Home")."""
+    p = urlparse(url)
+    parts = p.netloc.lower().split(":")[0].removeprefix("www.").split(".")
+    first = next(iter(s for s in p.path.split("/") if s), "")
+    if sources.detect_ats(url) != "other" and len(parts) > 2:
+        name = first if parts[0] in ("apply", "jobs", "boards", "job-boards", "careers") and first else parts[0]
+    else:
+        name = parts[-2] if len(parts) >= 2 else parts[0]
+    name = re.sub(r"^(careers?|jobs?|apply|campus\w*)-|-(careers?|jobs?)$", "", name)
+    return name.replace("-", " ").title()[:60]
+
+
 def adhoc_job(url: str, title: str) -> dict:
-    host = urlparse(url).netloc.removeprefix("www.")
-    return {"id": sources.listing_id(url), "company": (title or host).split(" - ")[-1].split(" | ")[-1][:60] or host,
-            "title": (title or "Application")[:120], "url": url, "locations": [], "source": "page", "ats": sources.detect_ats(url)}
+    return {"id": sources.listing_id(url), "company": site_name(url) or "Unknown",
+            "title": (_TITLE_NOISE.sub("", title or "") or "Application")[:120], "url": url, "locations": [],
+            "source": "page", "ats": sources.detect_ats(url)}
 
 
 def extension_build(origin: str) -> str:
@@ -430,6 +500,25 @@ def build_extension(server_url: str) -> bytes:
 
 # --- HTTP -------------------------------------------------------------------------
 
+class Refused(Exception):
+    """A request that won't be acted on: the reply is this status and message."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
+class Server(ThreadingHTTPServer):
+    """One server per port. Python's HTTP server asks to share its address, and on Windows that lets a second
+    `ja serve` start on the same port and take some of the requests."""
+    allow_reuse_address = sys.platform != "win32"
+
+    def server_bind(self):
+        if sys.platform == "win32":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "JobApps/1.0"
     allowed_hosts: set[str] = set()
@@ -447,7 +536,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         login = self.headers.get("Tailscale-User-Login")
         if login is not None:
-            return not self.allowed_logins or login.lower() in self.allowed_logins
+            return login.lower() in self.allowed_logins  # an empty list lets no one in (see set_access)
         return self.client_address[0] in ("127.0.0.1", "::1")
 
     # helpers -----------------------------------------------------------------
@@ -469,15 +558,36 @@ class Handler(BaseHTTPRequestHandler):
     def _body(self) -> bytes:
         n = int(self.headers.get("Content-Length") or 0)
         if n > 20 * 1024 * 1024:
-            raise ValueError("upload too large")
+            raise Refused(413, "upload too large")
         return self.rfile.read(n) if n else b""
 
     def _jbody(self) -> dict:
         raw = self._body()
-        return json.loads(raw) if raw else {}
+        if not raw:
+            return {}
+        # A form on any website can post plain text or form fields here; only the dashboard's own pages and the
+        # extension can send this type without the browser asking the server first.
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip().lower() != "application/json":
+            raise Refused(415, "send JSON as application/json")
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise Refused(400, "the body must be a JSON object")
+        return body
+
+    def _cross_site(self) -> bool:
+        """A change requested by some other web page (CSRF): browsers send its Origin even when the page can't read
+        the reply. Only the dashboard's own origin (the name and port this request came to) and the extension's
+        are fine; no Origin is a script or curl."""
+        origin = self.headers.get("Origin")
+        if origin is None or origin.startswith("chrome-extension://"):
+            return False
+        return urlparse(origin).netloc.lower() != (self.headers.get("Host") or "").lower()
 
     def _route(self, method: str):
-        if not self._allowed():
+        if not self._allowed() or (method != "GET" and self._cross_site()):
             return self._send(403, b"forbidden", "text/plain")
         path = urlparse(self.path).path
         try:
@@ -489,6 +599,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
         except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             return  # the browser went away (page reloaded, tab closed): nothing to answer
+        except Refused as exc:
+            self._json({"error": str(exc)}, exc.status)
         except Exception as exc:
             traceback.print_exc()
             try:
@@ -549,10 +661,19 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"ok": True})
 
     def api_answer(self, job_id):
+        """Your edit of a written answer. Emptying the box is an edit too: the draft doesn't come back."""
         body = self._jbody()
+        key, text = body.get("qkey"), body.get("text")
+        if not isinstance(key, str) or not isinstance(text, str):
+            return self._json({"error": "qkey and text are required"}, 400)
         conn = db.connect()
         try:
-            db.save_final_answer(conn, job_id, body["qkey"], body.get("text") or None)
+            a = db.answers_for(conn, job_id).get(key)
+            fields = (db.get_form(conn, job_id) or {}).get("fields") or []
+            label = a["question"] if a else next((f["label"] for f in fields if qkey(f.get("label") or "") == key), None)
+            if label is None:
+                return self._json({"error": "that question isn't on this job any more"}, 404)
+            db.save_final_answer(conn, job_id, key, text if text.strip() else "", label or "")
         finally:
             conn.close()
         self._json({"ok": True})
@@ -582,7 +703,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load_config()
             try:
                 result = drafts.redraft_answer(conn, cfg["drafts"], load_profile(), job, form.get("description") or "", f,
-                                               instruction, a.get("final_answer") or a.get("answer") or "", date.today())
+                                               instruction, db.answer_text(a), date.today())
             except llm.LLMError as exc:
                 return self._json({"error": f"Claude couldn't redraft it: {exc}"}, 502)
             self._json({"ok": True, **result})
@@ -747,11 +868,14 @@ class Handler(BaseHTTPRequestHandler):
         data = self._body()
         if not data.startswith(b"%PDF"):
             return self._json({"error": "please upload a PDF"}, 400)
-        (ROOT / "resume.pdf").write_bytes(data)
+        try:  # read it before it replaces the resume you have
+            drafts.pdf_text(io.BytesIO(data))
+        except Exception:
+            return self._json({"error": "that PDF can't be read (damaged or password-protected?); your resume is unchanged"}, 400)
+        config.atomic_write(ROOT / "resume.pdf", data)
         if load_profile().get("files.resume") != "resume.pdf":
             config.update_profile({"files.resume": "resume.pdf"})
         profile = load_profile()
-        drafts.resume_text(profile)  # extract now so errors show up immediately
         # Today's list was picked without this resume: re-pick the jobs you haven't started.
         repicking = RUNNER.start("re-pick with your resume", run_daily(rebuild=True))
         self._json({"ok": True, "setup": setup_view(profile), "repicking": repicking})
@@ -777,12 +901,12 @@ class Handler(BaseHTTPRequestHandler):
 
     # extension API -------------------------------------------------------------
     def _job_for(self, conn, body) -> dict:
-        urls = [body.get("frame_url"), body.get("url")]
-        if body.get("job_id"):
-            job = db.get_listing(conn, body["job_id"])
-            if job:
-                return job
-        return match_job(conn, urls) or adhoc_job(body.get("url") or "", body.get("title") or "")
+        """The page's own posting if it is one we know; else the job this tab was working on (job_id: the
+        application continues on another page, e.g. the ATS a career site hands you to, or Workday's candidate home
+        after you submit); else a page you found yourself."""
+        found = match_job(conn, [body.get("frame_url"), body.get("url")])
+        hinted = db.get_listing(conn, body["job_id"]) if body.get("job_id") else None
+        return found or hinted or adhoc_job(body.get("url") or "", body.get("title") or "")
 
     def api_ext_plan(self):
         body = self._jbody()
@@ -790,7 +914,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             job = self._job_for(conn, body)
             profile = load_profile()
-            resolver = Resolver(profile, job, load_learned(), _drafts(db.answers_for(conn, job["id"])))
+            resolver = Resolver(profile, job, load_learned(), db.current_answers(db.answers_for(conn, job["id"])))
             fields = body.get("fields") or []
             in_batch = any(r["job_id"] == job["id"] for r in db.batch(conn, date.today().isoformat()))
             actions = plan.actions(resolver, fields)
@@ -843,7 +967,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             job = self._job_for(conn, body)
             for e in body.get("edited_drafts") or []:
-                db.save_final_answer(conn, job["id"], qkey(e["label"]), str(e["answer"]).strip())
+                db.save_final_answer(conn, job["id"], qkey(e["label"]), str(e["answer"]).strip(), e["label"])
         finally:
             conn.close()
         where = [remember(e["label"], e["answer"], e.get("rule") or "", e.get("type", ""), job["company"]) for e in entries]
@@ -853,7 +977,7 @@ class Handler(BaseHTTPRequestHandler):
                 db.answered(conn, [qkey(e["label"]) for e in entries])
             finally:
                 conn.close()
-        self._json({"ok": True, "saved": len(entries), "where": where})
+        self._json({"ok": True, "saved": sum(w != "not stored" for w in where), "where": where})
 
     def api_ext_status(self):
         body = self._jbody()
@@ -891,8 +1015,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"id": job_id, "company": job["company"], "title": job["title"], "url": job["url"],
                         "locations": job["locations"], "description": form.get("description") or "",
                         "saved_at": (form.get("fetched_at") or "")[:16], "events": db.events_for(conn, job_id),
-                        "answers": [{"question": a["question"], "answer": a["final_answer"] or a["answer"]}
-                                    for a in db.answers_for(conn, job_id).values() if a["final_answer"] or a["answer"]],
+                        "answers": [{"question": a["question"], "answer": db.answer_text(a)}
+                                    for a in db.answers_for(conn, job_id).values() if db.answer_text(a)],
                         "minutes": round(db.active_seconds(conn, [job_id]).get(job_id, 0) / 60, 1)})
         finally:
             conn.close()
@@ -945,23 +1069,50 @@ ROUTES = [
 ]
 
 
+def set_access(cfg: dict, ts: dict) -> bool:
+    """Who may reach the server: this PC's own names plus server.allowed_hosts, and the logins under
+    server.allowed_logins or else the Tailscale account this PC is signed in to. False while Tailscale hasn't said
+    who that is; until it does, no tailnet login is let in."""
+    hosts = {"127.0.0.1", "localhost", "::1", *(h.lower() for h in cfg.get("allowed_hosts") or [])}
+    if ts.get("dns"):
+        hosts |= {ts["dns"].lower(), ts["dns"].split(".")[0].lower(), *ts["ips"]}
+    logins = cfg.get("allowed_logins") or ([ts["login"]] if ts.get("login") else [])
+    Handler.allowed_hosts, Handler.allowed_logins = hosts, {l.lower() for l in logins}
+    return bool(ts.get("dns") and logins)
+
+
+def announce(cfg: dict, ts: dict, port: int) -> None:
+    https_port = cfg.get("tailscale_https_port", 8443)
+    print(f"From your other devices: https://{ts['dns']}:{https_port}  (needs: tailscale serve --bg --https={https_port} "
+          f"http://127.0.0.1:{port})", flush=True)
+    print(f"Allowed tailnet logins: {', '.join(sorted(Handler.allowed_logins))}", flush=True)
+
+
+def wait_for_tailscale(cfg: dict, port: int) -> None:
+    """A server started at logon is often up before Tailscale is: keep asking until it says who this PC is."""
+    while True:
+        time.sleep(60)
+        ts = tailscale_info()
+        if set_access(cfg, ts):
+            return announce(cfg, ts, port)
+
+
 def serve(port: int | None = None) -> None:
     cfg = load_config().get("server", {})
     port = port or int(cfg.get("port", 8765))
     ts = tailscale_info()
-    Handler.allowed_hosts = {"127.0.0.1", "localhost", "::1", *(h.lower() for h in cfg.get("allowed_hosts") or [])}
-    if ts.get("dns"):
-        Handler.allowed_hosts |= {ts["dns"].lower(), ts["dns"].split(".")[0].lower(), *ts["ips"]}
-    logins = cfg.get("allowed_logins") or ([ts["login"]] if ts.get("login") else [])
-    Handler.allowed_logins = {l.lower() for l in logins}
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    known = set_access(cfg, ts)
+    try:
+        httpd = Server(("127.0.0.1", port), Handler)
+    except OSError as exc:
+        raise SystemExit(f"Can't listen on 127.0.0.1:{port} ({exc}). Is JobApps already running?") from None
     threading.Thread(target=scheduler, daemon=True).start()
-    https_port = cfg.get("tailscale_https_port", 8443)
     print(f"JobApps dashboard on http://127.0.0.1:{port}", flush=True)
-    if ts.get("dns"):
-        print(f"From your Mac: https://{ts['dns']}:{https_port}  (needs: tailscale serve --bg --https={https_port} "
-              f"http://127.0.0.1:{port})", flush=True)
-        print(f"Allowed tailnet logins: {', '.join(sorted(Handler.allowed_logins)) or 'any'}", flush=True)
+    if known:
+        announce(cfg, ts, port)
+    elif tailscale_exe():
+        print("Tailscale hasn't said who this PC is: other devices are refused until it does (asking every minute)", flush=True)
+        threading.Thread(target=wait_for_tailscale, args=(cfg, port), daemon=True).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

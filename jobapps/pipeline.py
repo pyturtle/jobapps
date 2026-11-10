@@ -10,15 +10,17 @@ the posting sentence that ruled it out) is kept per day so the dashboard can sho
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from jobapps import db, discover, drafts, fit, forms, llm, net, picker, report, screen, sources
+from jobapps import db, discover, drafts, fit, forms, llm, net, picker, report, research, screen, sources
 from jobapps.config import Profile, load_learned
 from jobapps.forms import Field
-from jobapps.rules import Resolver, is_canadian
+from jobapps.picker import company_keys
+from jobapps.rules import Resolver, is_canadian, towns
 
 
 def fetch(conn, cfg: dict, log=print) -> None:
@@ -62,21 +64,26 @@ def still_open(conn, job: dict, log=print) -> bool:
         return True
     if form is not None:
         db.save_form(conn, job["id"], form.ats, form.description, [f.to_dict() for f in form.fields], form.apply_url)
-        vague = not job.get("locations") or all(re.fullmatch(r"\d+ locations?", l.strip(), re.I) for l in job["locations"])
-        if vague and form.locations:  # Workday lists multi-city jobs as "2 Locations"; the posting has the cities
+        if unplaced(job) and form.locations:  # Workday lists multi-city jobs as "2 Locations"; the posting has the cities
             job["locations"] = form.locations
             db.set_locations(conn, job["id"], form.locations)
     return True
 
 
 def description_for(conn, job: dict) -> str:
-    """Posting text for fit checks: from the ATS API if we have it, else the page itself (once)."""
+    """Posting text for fit checks: from the ATS API if we have it, else the page itself; '' if neither has it.
+    Page text saved earlier that isn't a posting (menus of a page that loads it with JavaScript) is read again."""
     form = db.get_form(conn, job["id"])
-    if form:
-        return form.get("description") or ""
+    desc = (form or {}).get("description") or ""
+    if form and (form["ats"] != "page" or job["ats"] in forms.READERS or forms.looks_like_posting(desc)):
+        return desc
     text = forms.page_description(job["url"])
-    db.save_form(conn, job["id"], "page", text, [], "")  # 'page' = description only, questions read live
+    if text or not form or len(desc) > forms.MAX_PAGE_TEXT:  # a whole careers page isn't kept as this job's text
+        db.save_form(conn, job["id"], "page", text, [], "")  # 'page' = description only, questions read live
     return text
+
+
+GOOD = ("good", "strong")
 
 
 @dataclass
@@ -87,6 +94,8 @@ class Scored:
     description: str
     screen: dict | None = None
     screen_points: int = 0
+    source: str = "posting"   # where the text came from: posting | research | research-unverified (see research.py)
+    source_url: str = ""
 
     @property
     def total(self) -> int:
@@ -112,24 +121,13 @@ def _exclude(excluded: list, job: dict, reason: str, quote: str = "") -> None:
     excluded.append({"id": job["id"], "company": job["company"], "title": job["title"], "reason": reason, "quote": quote})
 
 
-_TERMISH = re.compile(r"\([^)]*\)|\[[^\]]*\]|\b(summer|fall|autumn|winter|spring|20\d\d|\d+[ -]?months?|\d+[ -]?mos?)\b", re.I)
-
-
-_LEGAL = {"inc", "incorporated", "ltd", "limited", "llc", "llp", "corp", "corporation", "co", "company", "plc", "the",
-          "group", "holdings", "ulc", "lp", "gmbh", "sa", "ag"}
-_FILLER = {"of", "and", "for", "de", "du", "des", "la", "le"}
-
-
-def company_keys(name: str) -> set[str]:
-    """Ways one company is written: "Hewlett Packard Enterprise" -> {hewlettpackardenterprise, hpe};
-    "Royal Bank of Canada" -> {royalbankofcanada, rbc}; "Motorola Solutions Inc." -> {motorolasolutions, ms}...
-    Initials only count from 3 letters, so two-letter ones can't merge different companies."""
-    words = [w for w in re.findall(r"[a-z0-9]+", (name or "").lower().replace("&", " and ")) if w not in _LEGAL]
-    keys = {"".join(words)} if words else set()
-    initials = "".join(w[0] for w in words if w not in _FILLER)
-    if len(words) >= 2 and len(initials) >= 3:
-        keys.add(initials)
-    return keys
+_TERMISH = re.compile(r"\b(summer|fall|autumn|winter|spring|20\d\d|\d+[ -]?months?|\d+[ -]?mos?)\b", re.I)
+_BRACKETED = re.compile(r"\(([^)]*)\)|\[([^\]]*)\]")
+# Bracket text that only says when, how long or what kind of placement: "(Winter 2027, 8 months)", "(Co-op)".
+_WHEN = re.compile(r"\b(?:summer|fall|autumn|winter|spring|(?:l')?[ée]t[ée]|hiver|automne|printemps|jan(?:uary)?|feb(?:ruary)?"
+                   r"|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+                   r"|20\d\d|\d+|months?|mos?|weeks?|co-?op|intern(?:ship)?s?|stagiaire|start|date|intake|term|contract"
+                   r"|placement|on-?site|hybrid|remote|or|and|to)\b", re.I)
 
 
 def company_key(name: str) -> str:
@@ -140,19 +138,42 @@ def company_key(name: str) -> str:
 
 def same_job_key(company: str, title: str) -> str:
     """The same role posted twice (two career sites, two feeds, a repost): company + title without the term,
-    year or length decorations ("Developer Intern (Summer 2027)" == "Developer Intern - 2027")."""
-    t = _TERMISH.sub(" ", title or "")
+    year or length decorations ("Developer Intern (Summer 2027)" == "Developer Intern - 2027"). Brackets that
+    name the team or the work stay: "Developer Intern (Payments)" is another role."""
+    def bracket(m):
+        text = m.group(1) or m.group(2) or ""
+        return f" {text} " if re.search(r"[^\W_]", _WHEN.sub("", text)) else " "
+    t = _TERMISH.sub(" ", _BRACKETED.sub(bracket, title or ""))
     return f"{company_key(company)}|{re.sub(r'[^a-z0-9]+', ' ', t.lower()).strip()}"
 
 
-def already_seen(conn) -> tuple[set[str], set[str]]:
-    """Postings you've had (any list, any outcome) or that were ruled out, and their same-job keys."""
+def unplaced(job: dict) -> bool:
+    """No location to go by: none listed, or Workday's "2 Locations" (the posting itself names the cities)."""
+    return not job.get("locations") or all(re.fullmatch(r"\d+ locations?", l.strip(), re.I) for l in job["locations"])
+
+
+def places(job: dict) -> list[frozenset[str]]:
+    """Each town the posting names (see rules.towns); empty when it could be anywhere."""
+    return [t for loc in job.get("locations") or [] for part in re.split(r"[;|]", loc) if (t := towns(part))]
+
+
+def is_repeat(job: dict, seen_jobs: dict[str, list]) -> bool:
+    """The same role as one in `seen_jobs`: same company and title, and a town in common. A posting that names
+    no town could be any of them, so it counts as the same."""
+    mine = places(job)
+    return any(not mine or not theirs or any(a <= b or b <= a for a in mine for b in theirs)
+               for theirs in seen_jobs.get(same_job_key(job["company"], job["title"]), ()))
+
+
+def already_seen(conn) -> tuple[set[str], dict[str, list]]:
+    """Postings you've had (any list, any outcome) or that were ruled out, and those roles by same-job key with the
+    towns of each posting, so the same role under another link isn't read, screened or offered again."""
     ids = db.tracked_ids(conn) | {r[0] for r in conn.execute(
         "SELECT DISTINCT job_id FROM events WHERE kind IN ('picked', 'carried', 'added', 'released', 'ruled_out')")}
-    keys = set()
-    for job_id in ids - {r[0] for r in conn.execute("SELECT DISTINCT job_id FROM events WHERE kind = 'ruled_out'")}:
+    keys: dict[str, list] = {}
+    for job_id in sorted(ids):
         if job := db.get_listing(conn, job_id):
-            keys.add(same_job_key(job["company"], job["title"]))
+            keys.setdefault(same_job_key(job["company"], job["title"]), []).append(places(job))
     return ids, keys
 
 
@@ -199,48 +220,104 @@ def build_batch(conn, cfg: dict, profile: Profile, today: date, extra: int = 0, 
     seen_ids, seen_jobs = already_seen(conn)
     cooldown = recent_companies(conn, today, int(cfg.get("company_cooldown_days", 7)))
 
+    def cooling(job: dict) -> bool:
+        return bool(company_keys(job["company"]) & cooldown)
+
+    # Postings outside Canada can take only so many of the day's picks, so they get the same share of the
+    # shortlist and of the new screens. Otherwise both fill with postings the pick step has to pass over.
+    max_abroad = cfg.get("max_outside_canada_per_day")
+    abroad_used = sum(1 for job_id in listed if not in_canada(db.get_listing(conn, job_id) or {}))
+
+    def abroad_share(n: int) -> int:
+        if max_abroad is None:
+            return n
+        return min(n, math.ceil(n * max(0, int(max_abroad) - abroad_used) / max(1, want)))
+
     fcfg, scfg = cfg.get("fit", {}), cfg.get("screen", {})
     background = drafts.background(profile) if drafts.has_material(profile) else ""
     cand = fit.candidate(profile, background)
     excluded: list[dict] = []
 
-    # Stage 1: metadata ranking -> a shortlist of postings that are still open.
+    # Stage 1: metadata ranking -> a shortlist of postings that are still open. Companies you've had lately
+    # go last, as in the pick step: they only come back when there aren't enough others.
     shortlist, checked = [], 0
     size = int(fcfg.get("shortlist", 40))
-    dupes = 0
-    for job, verdict in picker.rank(db.active_listings(conn), cfg, today, exclude_ids=seen_ids):
+    dupes, away, away_max = 0, 0, abroad_share(size)
+    shortlisted = Counter()  # a company with a dozen openings gets a pick plus a spare, not a quarter of the list
+    ranked = sorted(picker.rank(db.active_listings(conn), cfg, today, exclude_ids=seen_ids), key=lambda r: cooling(r[0]))
+    for job, verdict in ranked:
         if len(shortlist) >= size or checked >= size * 2:
             break
-        if per_company[company_key(job["company"])] >= limit:
+        company = company_key(job["company"])
+        if per_company[company] >= limit or shortlisted[company] >= 2 * limit:
             continue
-        if same_job_key(job["company"], job["title"]) in seen_jobs:
-            dupes += 1  # the same role you've already had, under another link
+        if is_repeat(job, seen_jobs):
+            dupes += 1  # a role you've had, that was ruled out or that is already shortlisted, under another link
+            continue
+        if away >= away_max and not unplaced(job) and not in_canada(job):
             continue
         checked += 1
         if not still_open(conn, job, log):
             db.deactivate(conn, job["id"])
             continue
+        if not in_canada(job):  # asked again: reading the posting can fill in where it is
+            if away >= away_max:
+                continue
+            away += 1
         shortlist.append((job, verdict))
-    log(f"  stage 1: {len(shortlist)} open postings shortlisted ({dupes} repeats of jobs you've had skipped)")
+        shortlisted[company] += 1
+        seen_jobs.setdefault(same_job_key(job["company"], job["title"]), []).append(places(job))
+    log(f"  stage 1: {len(shortlist)} open postings shortlisted, {away} outside Canada ({dupes} repeats skipped)")
 
-    # Stage 2: deterministic fit + eligibility against your resume.
+    # Stage 2: deterministic fit + eligibility against your resume. Postings whose text can't be read are
+    # looked up by Claude first (best-ranked first, a few a day), so they're judged like the rest.
+    texts = {job["id"]: description_for(conn, job) for job, _ in shortlist}
+    unread = [job for job, _ in shortlist if not texts[job["id"]]]
+    found = {}
+    if unread and cfg.get("research", {}).get("enabled", True) and llm.backend(cfg["drafts"]) == "claude-cli":
+        found = research.research_many(conn, cfg, unread, log)
     scored: list[Scored] = []
     for job, verdict in shortlist:
-        desc = description_for(conn, job)
-        result = fit.evaluate(job, desc, cand, cfg)
+        desc, source, source_url = texts[job["id"]], "posting", ""
+        if not desc and (r := found.get(job["id"])):
+            desc, source, source_url = r["text"], "research" if r["verified"] else "research-unverified", r["url"]
+        result = fit.evaluate(job, desc, cand, cfg, today)
         if not result.eligible:
             b = result.blockers[0]
             _exclude(excluded, job, b["reason"], b["quote"])
             continue
-        scored.append(Scored(job, verdict, result, desc))
+        scored.append(Scored(job, verdict, result, desc, source=source, source_url=source_url))
     scored.sort(key=Scored.key)
     log(f"  stage 2: {len(scored)} eligible, {len(excluded)} ruled out")
 
-    # Stage 3: grounded Claude screen of the best few (cached per job).
+    # Most applications arrive in a posting's first days, so an older one is only worth it as a good fit,
+    # judged by the screen when there is one (an old posting not screened yet waits; it isn't ruled out).
+    screening = bool(scfg.get("enabled", True) and background and llm.backend(cfg["drafts"]) != "none")
+    stale_days = int(cfg["filters"].get("stale_after_days", 21))
+
+    def too_old(s: Scored) -> bool:
+        if picker.age_days(s.job, today) <= stale_days:
+            return False
+        judged = not screening or (s.screen and s.screen.get("fit") is not None)
+        return not judged or s.verdict not in GOOD
+
+    # Stage 3: grounded Claude screen of the best few. A posting screened on an earlier day keeps its result
+    # for free, so `top` counts only the new ones.
     top = int(scfg.get("top", 12))
-    if scfg.get("enabled", True) and background and llm.backend(cfg["drafts"]) != "none" and scored:
-        items = [(s.job, s.description) for s in scored[:top] if s.description]
-        log(f"  stage 3: screening {len(items)} with Claude (cached ones are free)...")
+    if screening and scored:
+        # Companies you haven't had lately are screened first: a posting past stale_after_days can only be picked
+        # with a screen, so spending the screens on companies in their cooldown brings those companies back.
+        items, new, away, away_max = [], 0, 0, abroad_share(top)
+        for s in sorted(scored, key=lambda s: (cooling(s.job), s.key())):
+            if not s.description:
+                continue
+            if not screen.cached(conn, cfg, background, s.job, s.description):
+                abroad = not in_canada(s.job)
+                if new >= top or (abroad and away >= away_max):
+                    continue
+                new, away = new + 1, away + abroad
+            items.append((s.job, s.description))
+        log(f"  stage 3: screening {new} with Claude ({len(items) - new} screened on an earlier day)...")
         results = screen.screen_many(cfg, profile, background, items, log)
         weight, min_fit = int(scfg.get("weight", 40)), int(scfg.get("min_fit", 30))
         kept = []
@@ -255,7 +332,13 @@ def build_batch(conn, cfg: dict, profile: Profile, today: date, extra: int = 0, 
                     if s.screen["fit"] < min_fit:
                         _exclude(excluded, s.job, f"long shot (verified fit {s.screen['fit']}/100)")
                         continue
-                    s.screen_points = round(weight * s.screen["fit"] / 100)
+                    if too_old(s):
+                        _exclude(excluded, s.job, f"posted {picker.age_days(s.job, today)}d ago and only a {s.verdict} fit "
+                                                  f"({s.screen['fit']}/100); after {stale_days} days only good fits are picked")
+                        continue
+                    # half weight when the text is Claude's own copy of a page JobApps couldn't read
+                    trust = 0.5 if s.source == "research-unverified" else 1
+                    s.screen_points = round(weight * s.screen["fit"] / 100 * trust)
             kept.append(s)
         scored = sorted(kept, key=Scored.key)
 
@@ -263,14 +346,12 @@ def build_batch(conn, cfg: dict, profile: Profile, today: date, extra: int = 0, 
     # you've had in the last week only come back when there aren't enough others.
     reach_names = set().union(*(company_keys(n) for n in cfg.get("reach_companies") or []))
     max_reach, reach_used = int(cfg.get("max_reach_per_day", 1)), 0
-    max_abroad = cfg.get("max_outside_canada_per_day")
-    abroad_used = sum(1 for job_id in listed if not in_canada(db.get_listing(conn, job_id) or {}))
-    fresh = [s for s in scored if not company_keys(s.job["company"]) & cooldown]
+    fresh = [s for s in scored if not cooling(s.job)]
     for s in fresh + [s for s in scored if s not in fresh]:
         if len(chosen) >= want:
             break
         company = company_key(s.job["company"])
-        if per_company[company] >= limit:
+        if per_company[company] >= limit or too_old(s):
             continue
         reach = bool(company_keys(s.job["company"]) & reach_names) or s.verdict in ("stretch", "long shot")
         if reach and reach_used >= max_reach:
@@ -284,6 +365,7 @@ def build_batch(conn, cfg: dict, profile: Profile, today: date, extra: int = 0, 
         per_company[company] += 1
         db.save_pick(conn, key, s.job["id"], s.total, {
             "stage1": s.stage1.reasons, "fit": s.fit.to_dict(), "screen": s.screen,
+            "source": {"kind": s.source, "url": s.source_url},
             "verdict": s.verdict, "reach": reach, "screen_points": s.screen_points,
         })
     db.add_to_batch(conn, key, chosen)

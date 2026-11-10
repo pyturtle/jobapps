@@ -102,8 +102,7 @@ def _job_html(conn, pos: int, row: dict, job: dict, form: dict | None, answers: 
                    + "".join(f"<li>{e(r)}</li>" for r in verdict.reasons) + "</ul></details>")
 
     fields = [Field.from_dict(f) for f in (form or {}).get("fields", [])]
-    drafts = {k: v["final_answer"] or v["answer"] for k, v in answers.items() if v["final_answer"] or v["answer"]}
-    resolver = Resolver(profile, job, learned, drafts)
+    resolver = Resolver(profile, job, learned, db.current_answers(answers))
     plan = [(f, resolver.resolve(f)) for f in fields]
     questions = [(f, r) for f, r in plan if r.kind == "draft"]
 

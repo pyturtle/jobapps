@@ -5,7 +5,9 @@ live page at fill time instead (see filler.py).
 """
 from __future__ import annotations
 
+import json
 import re
+import time
 from dataclasses import asdict, dataclass, field
 from html import unescape
 from urllib.parse import unquote
@@ -62,16 +64,21 @@ def _epoch(value) -> int:
         return 0
 
 
+_SCRIPT = re.compile(r"(?is)<(script|style)\b.*?</\1>")
+
+
 def html_to_text(html: str) -> str:
     if not html:
         return ""
-    html = unescape(html)
-    html = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", html)
+    # Scripts go before entities are decoded (an escaped "</script>" inside one would end it early), and again
+    # after for HTML that arrives escaped (Greenhouse).
+    html = _SCRIPT.sub(" ", unescape(_SCRIPT.sub(" ", html)))
     html = re.sub(r"(?i)<li[^>]*>", "\n- ", html)
     html = re.sub(r"(?i)<br\s*/?>|</(p|div|li|h[1-6]|tr|ul|ol)>", "\n", html)
-    text = unescape(re.sub(r"<[^>]+>", " ", html))
+    text = unescape(re.sub(r"<[^>]+>", " ", html)).replace("\r", " ")
     text = re.sub(r"[ \t ]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"(?m)^-\n", "", text)  # list items with nothing in them (icon menus)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
@@ -268,12 +275,16 @@ def workday(url: str) -> Form | None:
         return None
     i = parts.index("job")
     api = f"https://{p.netloc}/wday/cxs/{p.netloc.split('.')[0]}/{parts[i - 1]}/{'/'.join(parts[i:])}"
-    try:
-        d = net.get_json(api, headers={"Accept": "application/json"})
-    except net.HttpError as exc:
-        if exc.status in (404, 410):
-            raise PostingClosed(url) from None
-        raise
+    for attempt in range(2):
+        try:
+            d = net.get_json(api, headers={"Accept": "application/json"})
+            break
+        except net.HttpError as exc:
+            if exc.status in (404, 410):
+                raise PostingClosed(url) from None
+            if exc.status != 403 or attempt:
+                raise
+            time.sleep(3)  # Workday answers a burst of requests with a short-lived 403
     info = d.get("jobPostingInfo") or {}
     if not info or info.get("canApply") is False:
         raise PostingClosed(url)
@@ -284,28 +295,121 @@ def workday(url: str) -> Form | None:
                 posted=_epoch(info.get("startDate")))
 
 
+# --- Oracle Cloud and Workable (descriptions only, from their public APIs) ---------
+
+def oracle(url: str) -> Form | None:
+    from urllib.parse import urlparse
+    p = urlparse(url)
+    m = re.search(r"/sites/([^/]+)/job/(\d+)", p.path)
+    if not m:
+        return None
+    try:
+        d = net.get_json(f"https://{p.netloc}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails"
+                         f"?expand=all&onlyData=true&finder=ById;Id=%22{m.group(2)}%22,siteNumber={m.group(1)}")
+    except net.HttpError as exc:
+        if exc.status in (404, 410):
+            raise PostingClosed(url) from None
+        raise
+    items = d.get("items") or []
+    if not items:
+        raise PostingClosed(url)
+    it = items[0]
+    text = "\n\n".join(html_to_text(it.get(k) or "") for k in ("ExternalDescriptionStr", "ExternalQualificationsStr",
+                                                                 "ExternalResponsibilitiesStr", "CorporateDescriptionStr"))
+    locations = [it.get("PrimaryLocation")] + [x.get("Name") for x in it.get("secondaryLocations") or []]
+    return Form("page", [], text.strip(), title=it.get("Title", ""), locations=[x for x in locations if x],
+                posted=_epoch(it.get("ExternalPostedStartDate")))
+
+
+def workable(url: str) -> Form | None:
+    m = re.search(r"apply\.workable\.com/([^/]+)/j/([0-9A-Za-z]+)", url)
+    if not m:
+        return None
+    try:
+        d = net.get_json(f"https://apply.workable.com/api/v2/accounts/{m.group(1)}/jobs/{m.group(2)}")
+    except net.HttpError as exc:
+        if exc.status in (404, 410):
+            raise PostingClosed(url) from None
+        raise
+    if d.get("state") not in (None, "published"):
+        raise PostingClosed(url)
+    text = "\n\n".join(html_to_text(d.get(k) or "") for k in ("description", "requirements", "benefits"))
+    return Form("page", [], text.strip(), title=d.get("title", ""), posted=_epoch(d.get("published")))
+
+
 # --- dispatch ---------------------------------------------------------------
 
-_READERS = {"greenhouse": greenhouse, "lever": lever, "ashby": ashby, "workday": workday}
+READERS = {"greenhouse": greenhouse, "lever": lever, "ashby": ashby, "workday": workday, "oracle": oracle,
+            "workable": workable}
 
 
 def prefetch(listing: dict) -> Form | None:
     """Return the form if this ATS is readable, None if not. Raises PostingClosed when the job is gone."""
     if listing["ats"] == "greenhouse":
         return greenhouse(listing["url"], listing.get("company", ""))
-    reader = _READERS.get(listing["ats"])
+    reader = READERS.get(listing["ats"])
     return reader(listing["url"]) if reader else None
 
 
+_POSTING_MARKERS = [re.compile(p, re.I) for p in (
+    r"qualifications?\b", r"requirements?\b", r"responsibilit", r"\byou will\b|\byou['’]ll\b", r"\bexperience (with|in)\b",
+    r"\b(bachelor|degree|enrolled|pursuing)\b", r"\b(intern(ship)?|co-?op)\b",
+    r"what you|about (the|this) (role|job|team)|who you are|about you")]
+
+
+MAX_PAGE_TEXT = 40_000  # one posting runs to a few thousand characters; a page this long lists many jobs
+
+
+def looks_like_posting(text: str) -> bool:
+    """A whole page's text that includes one job description: not just menus and a cookie banner (checked on
+    2026 pages: pages showing a posting hit 4-7 of these, shells that load it with JavaScript 0-3), and not a
+    careers page carrying every opening, whose rules would be read as this job's. For page text only: a
+    posting on its own (from an API or JobPosting data) can be terse and hit just 2."""
+    return 600 < len(text or "") <= MAX_PAGE_TEXT and sum(1 for m in _POSTING_MARKERS if m.search(text)) >= 4
+
+
+# What JSON is made of and prose isn't: "key": value, {"key", "value"}, }, and inside its strings a spelled-out
+# backslash-n, backslash-quote or backslash-u2019
+_DATA = re.compile(r'"\s*:\s*(?:["{\[\d]|true|false|null)|[{\[]\s*"|"\s*[}\]]|[}\]]\s*,', re.I)
+_ESCAPE = re.compile(r'\\u[0-9a-f]{4}|\\n|\\"', re.I)
+
+
+def without_data(text: str) -> str:
+    """Page text without the data some sites keep in their markup (a hidden element holding 150,000 characters
+    of settings, consent forms for every country and every other opening), which would be read as this job's rules."""
+    return "\n".join(line for line in text.split("\n") if not _ESCAPE.search(line) and len(_DATA.findall(line)) < 3)
+
+
+def page_text(html: str) -> str:
+    """What a page shows: no menus, no embedded data."""
+    return without_data(html_to_text(re.sub(r"(?is)<(nav|header|footer)\b.*?</\1>", " ", html)))
+
+
+def jsonld_posting(html: str) -> str:
+    """The schema.org JobPosting description many career sites embed for Google's job search
+    (employers' own sites, Eightfold and Recruitee sites...), even when the page itself needs JavaScript."""
+    for m in re.finditer(r"(?is)<script[^>]+application/ld\+json[^>]*>(.*?)</script>", html):
+        try:
+            data = json.loads(m.group(1).strip())
+        except ValueError:
+            continue
+        items = data if isinstance(data, list) else data.get("@graph", [data]) if isinstance(data, dict) else []
+        for x in items:
+            if isinstance(x, dict) and "JobPosting" in str(x.get("@type")) and x.get("description"):
+                return html_to_text(x["description"])
+    return ""
+
+
 def page_description(url: str) -> str:
-    """Job description from a server-rendered page (many company sites); '' if it needs JavaScript."""
+    """Job description from the posting's own page; '' if the page only has it after running JavaScript."""
     try:
         html = net.get_text(url, timeout=20, retries=1)
     except net.HttpError:
         return ""
-    html = re.sub(r"(?is)<(nav|header|footer)\b.*?</\1>", " ", html)
-    text = html_to_text(html)
-    return text if len(text) > 600 else ""
+    if len(text := jsonld_posting(html)) >= 300:
+        return text
+    text = page_text(html)
+    return text if looks_like_posting(text) else ""
 
 
 def check_open(listing: dict) -> Form | None:

@@ -23,15 +23,16 @@ BACKGROUND_PATH = ROOT / "background.md"
 
 # Built-in defaults; config.yaml overrides any of these keys.
 DEFAULTS: dict[str, Any] = {
-    "daily_count": 5,
+    "daily_count": 10,
     "carry_over": True,
     "carry_days": 3,
     "carry_max": 5,
-    "company_cooldown_days": 7,
+    "company_cooldown_days": 30,
     "max_per_company": 1,
     "sources": [],
     "filters": {
-        "max_age_days": 21,
+        "max_age_days": 90,
+        "stale_after_days": 21,
         "categories": [],
         "title_include": [],
         "title_exclude": [],
@@ -43,8 +44,8 @@ DEFAULTS: dict[str, Any] = {
         "exclude_companies": [],
     },
     "scoring": {
-        "recency_max": 40,
-        "recency_per_day": 2,
+        "recency_max": 30,
+        "recency_per_day": 1,
         "ats": {},
         "categories": {},
         "terms": {},
@@ -57,6 +58,8 @@ DEFAULTS: dict[str, Any] = {
     "max_outside_canada_per_day": None,
     "fit": {"shortlist": 40, "skill_points": 30, "unknown_points": 8, "max_years_required": 2},
     "screen": {"enabled": True, "top": 12, "weight": 40, "min_fit": 30, "effort": "low", "parallel": 3},
+    "research": {"enabled": True, "model": "claude-sonnet-5-5", "effort": "low", "budget_usd": 0.3,
+                 "max_per_day": 6, "parallel": 3},
     "discover": {"enabled": False, "budget_usd": 1.0, "max_results": 15, "effort": "low", "roles": [], "locations": []},
     "drafts": {
         "backend": "auto",
@@ -251,11 +254,14 @@ def set_yaml_value(text: str, dotted: str, value: Any) -> str:
 WRITE_LOCK = threading.RLock()
 
 
-def atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, content: str | bytes) -> None:
     """Write a whole new file, then swap it in: anything reading it at that moment sees the old or the new
     file, never half of one."""
     tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
+    if isinstance(content, bytes):
+        tmp.write_bytes(content)
+    else:
+        tmp.write_text(content, encoding="utf-8")
     os.replace(tmp, path)
 
 

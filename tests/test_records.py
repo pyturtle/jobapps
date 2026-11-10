@@ -63,6 +63,21 @@ def test_history_keeps_links_to_past_applications(tmp_path):
     assert records.postings(conn)["rows"][0]["applied_url"] == row["applied_url"]
 
 
+def test_one_submission_is_one_event(tmp_path):
+    conn = db.connect(tmp_path / "t.db")
+    db.upsert_listings(conn, [listing("a", "Acme", ["Toronto, ON"])], False)
+    db.add_to_batch(conn, "2026-10-26", ["a"])
+    db.set_status(conn, "a", "applied")                                     # marked on the dashboard: no page
+    db.set_status(conn, "a", "applied", url="https://acme.example/thanks")  # then the extension says where
+    db.set_status(conn, "a", "applied", url="https://acme.example/frame")   # and again from another frame
+    db.set_status(conn, "a", "applied")
+    assert [e["kind"] for e in db.events_for(conn, "a")] == ["picked", "applied", "applied"]
+    assert db.history(conn)[0]["applied_url"] == "https://acme.example/thanks"
+    db.set_status(conn, "a", "pending")
+    db.set_status(conn, "a", "applied", url="https://acme.example/thanks")  # undone, then submitted: a new event
+    assert [e["kind"] for e in db.events_for(conn, "a")][-2:] == ["reopened", "applied"]
+
+
 def test_no_repeats(tmp_path, monkeypatch):
     from datetime import date
 
@@ -86,7 +101,8 @@ def test_no_repeats(tmp_path, monkeypatch):
     assert pipeline.carry_over(conn, cfg, date(2026, 10, 28)) == ["b"]           # a is from 8 days ago
     ids, keys = pipeline.already_seen(conn)
     assert ids == {"a", "b", "c", "d"}                                            # never picked again
-    assert pipeline.same_job_key("Altera", "Altera Intern") in keys and pipeline.same_job_key("Intel", "Intel Intern") not in keys
+    # a role that was ruled out is not read again under another link either
+    assert pipeline.same_job_key("Altera", "Altera Intern") in keys and pipeline.same_job_key("Intel", "Intel Intern") in keys
     assert pipeline.recent_companies(conn, date(2026, 10, 28), 7) == {"simbe", "altera"}
     # saying "applied" again is not a second event
     db.set_status(conn, "c", "applied")
@@ -101,3 +117,34 @@ def test_one_company_many_spellings():
     assert not company_keys("General Magic") & company_keys("GM")             # two letters never merge companies
     assert not company_keys("Uber") & company_keys("Disney")
     assert same_job_key("Hewlett Packard Enterprise", "Software Development Intern - AI-Assisted Development - Summer 2027")         == same_job_key("HPE", "Software Development Intern, AI-Assisted Development (Winter 2027)")
+
+
+def test_same_role_means_same_title_and_town():
+    from jobapps.pipeline import is_repeat, places, same_job_key
+    from jobapps.rules import towns
+    # brackets that only say when, how long or what kind of placement are decoration
+    plain = same_job_key("Acme", "Software Developer Intern")
+    for title in ("Software Developer Intern (Summer 2027)", "Software Developer Intern [8 months]",
+                  "Software Developer Intern (Co-op, Winter 2027 - 4 or 8 months)", "Software Developer Intern (Été 2027)"):
+        assert same_job_key("Acme", title) == plain, title
+    # brackets that name the team, the work or the place make it another role
+    assert same_job_key("Acme", "Software Developer Intern (Payments)") != same_job_key("Acme", "Software Developer Intern (Platform)")
+    assert same_job_key("Acme", "Software Developer Intern (Payments)") != plain
+    assert same_job_key("Acme", "Software Developer Intern (PhD)") != plain
+
+    assert towns("Toronto, ON") == towns("CA, ON, Toronto") == towns("Toronto, Ontario, Canada") == {"toronto"}
+    assert towns("CA-BC-VANCOUVER") == towns("CAN - Vancouver") == {"vancouver"}
+    assert towns("Montréal, QC") == {"montreal"} and towns("NYC") == towns("New York, NY") == {"new", "york"}
+    assert towns("Remote in Canada") == towns("5 Locations") == towns("") == frozenset()
+    assert places({"locations": ["Toronto, ON; Waterloo, ON", "Remote"]}) == [{"toronto"}, {"waterloo"}]
+
+    def job(*locations):
+        return {"company": "Acme", "title": "Software Developer Intern (Summer 2027)", "locations": list(locations)}
+
+    seen = {plain: [places(job("Toronto, ON"))]}
+    assert is_repeat(job("CA, ON, Toronto"), seen)                       # another feed's spelling of the same place
+    assert is_repeat(job("Vancouver, BC", "Toronto, Ontario"), seen)      # one town in common
+    assert not is_repeat(job("Vancouver, BC"), seen)                      # the same title in another city is another job
+    assert is_repeat(job("2 Locations"), seen) and is_repeat(job(), seen)  # could be the one you had
+    assert is_repeat(job("Vancouver, BC"), {plain: [[]]})                 # the one you had named no town
+    assert not is_repeat({**job("Toronto, ON"), "title": "Data Intern"}, seen)

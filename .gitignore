@@ -21,3 +21,6 @@ jobapps-extension.zip
 
 # notes and research that aren't part of this project
 research_notes/
+
+# local Claude Code settings (machine names and paths)
+.claude/

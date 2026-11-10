@@ -171,3 +171,23 @@ def needs_draft(resolver: Resolver, fields: list[dict]) -> list[dict]:
         if res.kind == "draft" and not res.value and not has_value(f.get("value")):
             out.append(f)
     return out
+
+
+# --- has the application gone in? ---------------------------------------------
+# `ja apply` and the extension mark a job applied when the page says so (extension/content.js keeps a copy of the
+# first two patterns). A wrong "applied" takes the job off your list, so a page that only talks about submitting
+# doesn't count.
+
+SUBMITTED = re.compile(
+    r"thank(s| you) for (applying|your application|submitting)|application (was |has been )?(successfully )?"
+    r"(submitted|received|sent|completed?)\b|we('ve| have) received your application|your application (is|was|has been) "
+    r"(in *[.!]|submitted\b|received\b)", re.I)
+NOT_YET = re.compile(r"\b(once|after|when|if|until|before|as soon as|whether)\b[^.!?\n]*(?![\s\S])", re.I)
+# the end of the address, not a word anywhere in it (".../customer-success-intern/apply")
+SUBMITTED_PATH = re.compile(r"/(thanks?([-_]?you)?|confirmation|confirmed|submitted|success)/?$", re.I)
+
+
+def says_submitted(text: str) -> bool:
+    """Whether a page's text says the application went in. "Your application is incomplete" doesn't, and neither
+    does a sentence about later ("Once your application has been submitted, we will...")."""
+    return any(not NOT_YET.search(text[max(0, m.start() - 80):m.start()]) for m in SUBMITTED.finditer(text))

@@ -132,6 +132,9 @@ details.part[open] > summary { margin-bottom: 10px; }
 .q-foot .btn { margin-left: auto; }
 .check { font-size: 12.5px; padding: 2px 9px; border-radius: 99px; background: var(--stretch-soft); color: var(--stretch); }
 .check.ok { background: var(--strong-soft); color: var(--strong); }
+.check.bad { background: var(--bad-soft); color: var(--bad); }
+.q-foot .checks { display: contents; }
+.q textarea[readonly] { opacity: .6; }
 .note { color: var(--muted); font-size: 14px; margin: 4px 0 12px; }
 .speaks { margin: 8px 0 0; font-size: 13px; color: var(--muted); }
 details.ask { margin-top: 10px; }

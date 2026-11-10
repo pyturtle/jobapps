@@ -1,6 +1,6 @@
 """Command line entry point. Run `ja <command> -h` for options.
 
-  ja serve      run the dashboard + daily scheduler (open it from your Mac over Tailscale)
+  ja serve      run the dashboard + daily scheduler (open it from your other computer over Tailscale)
   ja today      build (or show) today's batch, draft answers, write the report
   ja apply [N]  fill today's jobs in a browser on this machine, one by one
   ja done N     mark job N applied        ja skip N     drop job N
@@ -99,7 +99,12 @@ def cmd_serve(args, conn, cfg, profile, today):
 
 
 def cmd_apply(args, conn, cfg, profile, today):
-    from jobapps import filler
+    try:
+        from jobapps import filler
+    except ImportError:  # Playwright is an optional install; only this command drives a browser itself
+        log('`ja apply` needs Playwright: pip install -e ".[browser]" then: playwright install chromium\n'
+            "(The Chrome extension fills forms without it.)")
+        return 1
 
     if args.refs:
         jobs = []
@@ -187,8 +192,7 @@ def cmd_explain(args, conn, cfg, profile, today):
         log("\nForm not prefetched (this ATS is read in the browser).")
         return 0
     answers = db.answers_for(conn, job["id"])
-    resolver = Resolver(profile, job, load_learned(),
-                        {k: a["final_answer"] or a["answer"] for k, a in answers.items() if a["final_answer"] or a["answer"]})
+    resolver = Resolver(profile, job, load_learned(), db.current_answers(answers))
     log(f"\nForm ({form['ats']}, read {form['fetched_at']}):")
     for f in map(Field.from_dict, form["fields"]):
         r = resolver.resolve(f)
@@ -266,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-draft", action="store_true")
     p.add_argument("--open", action="store_true", help="open the HTML report")
     p = sub.add_parser("apply", help="fill today's pending jobs in a browser on this machine")
-    p.add_argument("refs", nargs="*", help="job numbers (1-5) or listing ids; default: all pending today")
+    p.add_argument("refs", nargs="*", help="job numbers from `ja status` or listing ids; default: all pending today")
     for name, help_ in (("done", "mark applied"), ("skip", "drop from your list")):
         p = sub.add_parser(name, help=help_)
         p.add_argument("refs", nargs="+")

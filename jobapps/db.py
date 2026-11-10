@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -71,13 +72,14 @@ def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def backup(keep: int = 7, path: Path = DB_PATH) -> Path | None:
-    """Consistent copy of the database to data/backups/jobapps-YYYY-MM-DD.db; keeps the newest `keep`."""
+def backup(keep: int = 7, path: Path = DB_PATH, files: tuple[Path, ...] = ()) -> Path | None:
+    """Consistent copy of the database to data/backups/jobapps-YYYY-MM-DD.db, with a copy of each of `files` (what
+    you wrote yourself: profile, notes, remembered answers) beside it; keeps the newest `keep` of each."""
     if not path.exists():
         return None
-    folder = path.parent / "backups"
+    folder, day = path.parent / "backups", datetime.now().date().isoformat()
     folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"jobapps-{datetime.now().date().isoformat()}.db"
+    target = folder / f"jobapps-{day}.db"
     src, dst = sqlite3.connect(path), sqlite3.connect(target)
     try:
         src.backup(dst)
@@ -86,6 +88,11 @@ def backup(keep: int = 7, path: Path = DB_PATH) -> Path | None:
         dst.close()
     for old in sorted(folder.glob("jobapps-*.db"))[:-keep]:
         old.unlink(missing_ok=True)
+    for f in files:
+        if f.exists():
+            shutil.copy2(f, folder / f"{f.stem}-{day}{f.suffix}")
+            for old in sorted(folder.glob(f"{f.stem}-*{f.suffix}"))[:-keep]:
+                old.unlink(missing_ok=True)
     return target
 
 
@@ -173,7 +180,9 @@ def set_meta(conn, key: str, value: str) -> None:
 # --- listings ---------------------------------------------------------------
 
 def upsert_listings(conn, listings: list[dict], deactivate_missing: bool) -> tuple[int, int]:
-    """Insert/refresh listings. Returns (new, total)."""
+    """Insert/refresh listings. Returns (new, total). A listing that is still up keeps the earliest date it was
+    given: a board that says "Posted 30+ Days Ago" on every read would otherwise never get older. One that was
+    taken down and is back takes the new date."""
     stamp = now()
     existing = {r["id"] for r in conn.execute("SELECT id FROM listings")}
     new = 0
@@ -189,7 +198,9 @@ def upsert_listings(conn, listings: list[dict], deactivate_missing: bool) -> tup
                    company = excluded.company, title = excluded.title, url = excluded.url, ats = excluded.ats,
                    locations = excluded.locations, terms = excluded.terms, category = excluded.category,
                    sponsorship = excluded.sponsorship, degrees = excluded.degrees,
-                   date_posted = excluded.date_posted,
+                   date_posted = CASE WHEN listings.active AND listings.date_posted > 0 AND
+                                           (excluded.date_posted = 0 OR excluded.date_posted > listings.date_posted)
+                                      THEN listings.date_posted ELSE excluded.date_posted END,
                    active = excluded.active, last_seen = excluded.last_seen""",
             {**l, **{c: json.dumps(l[c]) for c in LISTING_JSON_COLS}, "active": int(l["active"]), "stamp": stamp},
         )
@@ -240,13 +251,16 @@ def get_status(conn, job_id: str) -> str | None:
 
 def set_status(conn, job_id: str, status: str, note: str | None = None, url: str | None = None) -> None:
     """url: the page you were on when you said you'd submitted (kept in the record with the event)."""
-    if get_status(conn, job_id) == status and not url:
-        return  # nothing changed
+    if get_status(conn, job_id) == status:
+        last = conn.execute("SELECT detail FROM events WHERE job_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+                            (job_id, status)).fetchone()
+        if not url or (last and json.loads(last["detail"] or "{}").get("url")):
+            return  # nothing changed: each frame of a page reports the same submission, and that is one event
     conn.execute(
         """INSERT INTO applications(job_id, status, first_assigned, updated_at, note) VALUES(?, ?, ?, ?, ?)
            ON CONFLICT(job_id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at,
                note = COALESCE(excluded.note, applications.note)""",
-        (job_id, status, now(), now(), note),
+        (job_id, status, now()[:10], now(), note),  # first_assigned is a day, as for picked jobs
     )
     detail = {k: v for k, v in (("note", note), ("url", url)) if v}
     log_event(conn, job_id, "reopened" if status == "pending" else status, detail=detail or None)
@@ -397,9 +411,29 @@ def save_answer(conn, job_id: str, qkey: str, question: str, answer: str | None,
     conn.commit()
 
 
-def save_final_answer(conn, job_id: str, qkey: str, final: str) -> None:
-    conn.execute("UPDATE answers SET final_answer = ? WHERE job_id = ? AND qkey = ?", (final, job_id, qkey))
+def save_final_answer(conn, job_id: str, qkey: str, final: str | None, question: str = "") -> None:
+    """Your own text for an answer, kept beside the draft. "" is a box you emptied, None puts the draft back.
+    A question nothing was drafted for gets its row here, so what you wrote for it is stored all the same."""
+    if final is None:
+        conn.execute("UPDATE answers SET final_answer = NULL WHERE job_id = ? AND qkey = ?", (job_id, qkey))
+    else:
+        conn.execute(
+            """INSERT INTO answers(job_id, qkey, question, final_answer, created_at) VALUES(?, ?, ?, ?, ?)
+               ON CONFLICT(job_id, qkey) DO UPDATE SET final_answer = excluded.final_answer""",
+            (job_id, qkey, question, final, now()))
     conn.commit()
+
+
+def answer_text(a: dict | None) -> str:
+    """An answer as it stands: your text if you edited it (an emptied box stays empty), else the draft."""
+    a = a or {}
+    final = a.get("final_answer")
+    return (a.get("answer") or "") if final is None else final
+
+
+def current_answers(answers: dict[str, dict]) -> dict[str, str]:
+    """qkey -> text for the written answers that have any, as answer_text reads them."""
+    return {k: text for k, a in answers.items() if (text := answer_text(a))}
 
 
 def get_screen(conn, job_id: str, input_hash: str) -> dict | None:

@@ -6,18 +6,18 @@ const h = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<'
 async function api(path, opts = {}) {
   const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
   return data;
 }
 const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(body || {}) });
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, ms = 2400) {
   const t = $('#toast');
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+  toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
 
 let STATE = null;
@@ -50,11 +50,15 @@ async function loadState() {
   try {
     s = await api(`/api/state${viewDay ? `?day=${viewDay}` : ''}`);
   } catch (e) {
-    if (seq === loadSeq) $('#tab-today').innerHTML = `<div class="empty"><h2>Can't reach your JobApps server</h2><p>${h(e.message)}. Check that Tailscale is on.</p></div>`;
+    if (seq !== loadSeq) return;
+    // A list already on screen stays there, with whatever you've typed in it
+    if (STATE) toast(`Can't reach your JobApps server (${e.message}). Showing the list as it was.`, 6000);
+    else $('#tab-today').innerHTML = `<div class="empty"><h2>Can't reach your JobApps server</h2><p>${h(e.message)}. Check that Tailscale is on.</p></div>`;
     return;
   }
   if (seq !== loadSeq) return; // a newer request (e.g. you clicked to another day) wins
   STATE = s;
+  keepUnsaved();
   if (s.date === s.today) viewDay = null;
   const fresh = !prev || prev.date !== s.date;
   const now = fresh ? null : s.jobs.find((j) => j.id === openJob);
@@ -113,7 +117,7 @@ function todayHTML(s) {
     next ? `<button class="btn" data-day="${h(next)}">${h(next === s.today ? 'Today' : shortDate(next))} ›</button>` : '',
   ].join('');
   const out = [];
-  // The day's main list (5) and anything you added on top of it.
+  // The day's main list (daily_count) and anything you added on top of it.
   const main = jobs.filter((j) => !j.extra && j.how !== 'carried');
   const extras = jobs.filter((j) => j.extra);
   const carried = jobs.filter((j) => j.how === 'carried');
@@ -168,7 +172,7 @@ function todayHTML(s) {
     const today5 = [...main, ...extras];
     if (today5.length) out.push(`<div class="docket">${today5.map((j, i) => jobHTML(j, i + 1)).join('')}</div>`);
     if (carried.length) {
-      out.push(`${s.preview ? '' : `<h2 class="sub carried-h">Still open from earlier days <small>${carried.length}, on top of today's new picks, each for up to 3 days</small></h2>`}
+      out.push(`${s.preview ? '' : `<h2 class="sub carried-h">Still open from earlier days <small>${carried.length}, on top of today's new picks, each for up to ${s.carry_days === 1 ? '1 day' : `${Number(s.carry_days) || 3} days`}</small></h2>`}
         <div class="docket">${carried.map((j, i) => jobHTML(j, i + 1)).join('')}</div>`);
     }
   }
@@ -261,8 +265,16 @@ function countText(text, lim) {
 }
 
 function checksHTML(q) {
-  if (q.edited) return '<span class="check ok">Edited by you</span>';
   const c = q.checks;
+  if (q.edited) {
+    // The draft's checks were about the draft. After your edit, the ones the text itself still shows are kept.
+    const text = q.answer || '';
+    const out = ['<span class="check ok">Edited by you</span>'];
+    (text.match(/\[[^\]]{2,120}\]/g) || []).forEach((p) => out.push(`<span class="check">Fill in ${h(p)}</span>`));
+    ((c && c.unsupported_numbers) || []).filter((n) => text.includes(n))
+      .forEach((n) => out.push(`<span class="check">“${h(n)}” isn't in your resume</span>`));
+    return out.join('');
+  }
   if (!q.answer || !c) return '';
   const out = [];
   if (c.unsupported_facts && c.unsupported_facts.length) {
@@ -277,6 +289,18 @@ function checksHTML(q) {
   if (c.generic_phrases && c.generic_phrases.length) {
     out.push(`<span class="check" title="Recruiters skim past stock phrasing like this">Sounds generic: “${h(c.generic_phrases.slice(0, 3).join('”, “'))}”</span>`);
   }
+  // Shape: the lines you used to delete by hand.
+  if (c.fit_closer) out.push(`<span class="check" title="${h(c.fit_closer)}">Ends on a line about fitting the role</span>`);
+  if (c.self_verdicts && c.self_verdicts.length) {
+    out.push(`<span class="check" title="Say what you did and let the reader judge">Praises you: “${h(c.self_verdicts.slice(0, 2).join('”, “'))}”</span>`);
+  }
+  if (c.meta && c.meta.length) out.push(`<span class="check">Talks about the application: “${h(c.meta.slice(0, 2).join('”, “'))}”</span>`);
+  if (c.stat_stacks && c.stat_stacks.length) out.push(`<span class="check" title="${h(c.stat_stacks[0])}">Piles numbers into one sentence</span>`);
+  else if (c.many_numbers) out.push(`<span class="check">Uses ${c.number_count} numbers</span>`);
+  if (c.repeats && c.repeats.length) {
+    out.push(`<span class="check" title="${h(c.repeats.join('\n'))}">Repeats “${h(c.repeats[0].length > 40 ? c.repeats[0].slice(0, 40) + '…' : c.repeats[0])}” from another answer</span>`);
+  }
+  if (c.trimmed_closer) out.push(`<span class="check ok" title="${h(c.trimmed_closer)}">Cut its closing line about fit</span>`);
   return out.join('');
 }
 
@@ -288,6 +312,7 @@ function speaksHTML(q) {
 
 const previous = {};   // `${job}|${qkey}` -> the text before the last redraft, so you can put it back
 const asks = {};       // `${job}|${qkey}` -> what you've typed in its "change this" box (survives redraws)
+const unsaved = {};    // `${job}|${qkey}` -> { job, qkey, text } typed into an answer and not on the server yet
 const redrafting = new Set();
 
 function askHTML(j, q, id) {
@@ -317,10 +342,12 @@ function answersHTML(j) {
   const qs = j.questions.map((q, i) => {
     const lim = limitOf(q.limit);
     const id = `ans-${j.id}-${i}`;
-    const prev = previous[`${j.id}|${q.qkey}`];
+    const k = `${j.id}|${q.qkey}`;
+    const prev = previous[k];
     return `<div class="q"><p class="q-label">${h(q.label)}<small>${h([q.required ? 'Required' : 'Optional', q.limit].filter(Boolean).join(', '))}</small></p>
-      <textarea id="${id}" data-job="${h(j.id)}" data-qkey="${h(q.qkey)}" data-limit="${h(q.limit || '')}" placeholder="No draft yet. Write it here, or press Redraft once your resume is uploaded.">${h(q.answer || '')}</textarea>
-      <div class="q-foot"><span class="count" data-count="${id}">${countText(q.answer || '', lim)}</span>${checksHTML(q)}
+      <textarea id="${id}" data-job="${h(j.id)}" data-qkey="${h(q.qkey)}" data-limit="${h(q.limit || '')}" ${redrafting.has(k) ? 'readonly' : ''} placeholder="No draft yet. Write it here, or press Redraft once your resume is uploaded.">${h(q.answer || '')}</textarea>
+      <div class="q-foot"><span class="count" data-count="${id}">${countText(q.answer || '', lim)}</span><span class="checks" data-checks="${id}">${checksHTML(q)}</span>
+        <span class="check bad" data-unsaved="${h(k)}" ${unsaved[k] && unsaved[k].failed ? '' : 'hidden'}>${h(unsavedNote(unsaved[k]))}</span>
         ${prev != null ? `<button class="btn small quiet" data-restore="${id}">Put back the previous version</button>` : ''}
         <button class="btn small" data-copy="${id}">Copy</button></div>
       ${speaksHTML(q)}${askHTML(j, q, id)}</div>`;
@@ -338,11 +365,13 @@ async function redraftOne(t) {
   const q = job && job.questions.find((x) => x.qkey === t.dataset.qkey);
   if (!q) return;
   const before = q.answer || '';
-  redrafting.add(k);
+  redrafting.add(k);  // its text box is read-only until the new draft is in: nothing typed meanwhile to lose
   render();
   try {
+    await sendAnswer(k);  // the redraft starts from your text as it stands
     const res = await post(`/api/job/${encodeURIComponent(t.dataset.job)}/redraft-one`, { qkey: t.dataset.qkey, instruction, remember });
     previous[k] = before;
+    dropUnsaved(k);
     Object.assign(q, { answer: res.answer, checks: res.checks, edited: false });
     openState[`ask:${k}`] = false;
     delete asks[k];
@@ -370,6 +399,13 @@ function whyHTML(j) {
     parts.push(`<div class="skills">${(fit.matched || []).map((x) => `<span class="skill">${h(x)}</span>`).join('')}${(fit.missing || []).map((x) => `<span class="skill miss" title="The posting lists it; your resume doesn't">${h(x)}</span>`).join('')}</div>`);
   }
   (fit.warnings || []).forEach((w) => parts.push(`<div class="warn">${h(w.reason)}${w.quote ? `: <q>${h(w.quote)}</q>` : ''}</div>`));
+  // What Claude objected to that isn't a reason to rule a posting out (screen.py): yours to judge
+  ((sc && sc.concerns) || []).forEach((c) => parts.push(`<div class="warn">Check this: ${h(c.reason)}${c.quote ? `: <q>${h(c.quote)}</q>` : ''}</div>`));
+  // Postings JobApps couldn't read itself were looked up by Claude (research.py)
+  const src = pick.source || {};
+  const link = src.url ? ` (<a href="${h(src.url)}" target="_blank" rel="noopener">source</a>)` : '';
+  if (src.kind === 'research') parts.push(`<p class="small">This posting's page couldn't be read, so Claude found the same posting elsewhere${link} and the fit was judged on that page.</p>`);
+  if (src.kind === 'research-unverified') parts.push(`<div class="warn">This posting's page couldn't be read, so the fit was judged on Claude's summary of it${link}, not the posting's own words. It counts at half weight.</div>`);
   if (sc && sc.requirements && sc.requirements.length) {
     const sym = { met: '✓', partial: '◐', missing: '–' };
     const met = sc.requirements.filter((r) => r.status === 'met').length;
@@ -377,7 +413,7 @@ function whyHTML(j) {
     parts.push(`<details data-key="${h(key)}" ${openAttr(key, false)}><summary class="small">See the ${sc.requirements.length} requirements checked (${met} met, each quoting your resume)</summary>
       <ul class="reqs">${sc.requirements.map((r) => `<li><span class="mark ${h(r.status)}" aria-label="${h(r.status)}">${sym[r.status] || '·'}</span>
       <span>${h(r.requirement)}${r.kind === 'preferred' ? ' <span class="small">(nice to have)</span>' : ''}${r.evidence ? `<span class="evidence">Your resume: “${h(r.evidence)}”</span>` : ''}</span></li>`).join('')}</ul>
-      <p class="small">The server checked every quote word for word. Verified fit ${sc.fit ?? '–'} out of 100.${sc.dropped ? ` ${sc.dropped} unverifiable requirement${sc.dropped > 1 ? 's were' : ' was'} dropped.` : ''}${sc.downgraded ? ` ${sc.downgraded} claim${sc.downgraded > 1 ? 's' : ''} without a resume quote counted as missing.` : ''}</p></details>`);
+      <p class="small">The server found every quote in the posting or your resume (a slipped word or two is allowed, a changed number is not). Verified fit ${sc.fit ?? '–'} out of 100.${sc.dropped ? ` ${sc.dropped} unverifiable requirement${sc.dropped > 1 ? 's were' : ' was'} dropped.` : ''}${sc.downgraded ? ` ${sc.downgraded} claim${sc.downgraded > 1 ? 's' : ''} without a resume quote counted as missing.` : ''}</p></details>`);
   }
   if (!parts.length) return '';
   return `<div class="part"><h3>Why this fits you</h3>${parts.join('')}</div>`;
@@ -541,14 +577,14 @@ function renderSetup(s) {
   <div class="step"><h2><span class="n">5</span>Autofill on your laptop</h2>
     <p class="help">A small Chrome extension fills applications in your browser using the answers on your server. Set it up once and it keeps itself up to date.</p>
     <ol class="steps">
-      <li>On your Mac, open <strong>Terminal</strong> and paste this (Tailscale on):
+      <li>On a Mac, open <strong>Terminal</strong> and paste this (Tailscale on):
         <div class="cmd"><code id="mac-cmd">curl -fsSL ${h(location.origin)}/mac-setup.sh | bash</code><button class="btn small" data-copy="mac-cmd">Copy</button></div>
         It puts the extension in your home folder under <code>JobApps</code> and checks your server for a new version every 15 minutes.</li>
       <li>Open <code>chrome://extensions</code>, switch on <strong>Developer mode</strong> (top right), remove any older JobApps,
         click <strong>Load unpacked</strong> and pick <code>JobApps/jobapps-extension</code> in your home folder. Pin it to the toolbar.</li>
       <li>That's it: new versions install themselves. If one is waiting, the toolbar popup shows <em>Reload JobApps</em>.</li>
     </ol>
-    <p class="help" style="margin:12px 0 0">No Terminal? <a href="/jobapps-extension.zip">Download it</a> and load that folder instead; you'd download again for each update.
+    <p class="help" style="margin:12px 0 0">Not on a Mac? <a href="/jobapps-extension.zip">Download it</a>, unzip it and load that folder instead; you'd download again for each update.
       To stop updates later: <code>bash ~/JobApps/uninstall.sh</code></p>
   </div>
   <div class="step"><h2><span class="n">6</span>Use your changes today</h2>
@@ -772,7 +808,9 @@ async function loadHistory() {
 
 // One application's record: its links, your answers, the saved copy of the posting, and what happened when.
 const EVENT = { picked: 'Picked for your list', carried: 'Carried over', added: 'Added by you', released: 'Swapped out by a re-pick',
-  ruled_out: 'Ruled out', opened: 'Opened', applied: 'Applied', skipped: 'Skipped', closed: 'Posting closed', reopened: 'Undone' };
+  ruled_out: 'Ruled out', opened: 'Opened', applied: 'Applied', skipped: 'Skipped', closed: 'Posting closed', reopened: 'Undone',
+  corrected: 'Record corrected' };
+const eventWhy = (d) => (d ? d.reason || d.why || d.dropped || '' : '');
 
 async function toggleRecord(btn) {
   const box = document.getElementById(`rec-${btn.dataset.record}`);
@@ -791,7 +829,7 @@ async function toggleRecord(btn) {
       <p class="links"><a href="${h(r.url)}" target="_blank" rel="noopener">The posting</a>
         ${where && where !== r.url ? `<a href="${h(where)}" target="_blank" rel="noopener">The page you applied on</a>` : ''}
         ${r.minutes ? `<span class="small">${r.minutes} min spent</span>` : ''}</p>
-      <ol class="timeline">${r.events.map((e) => `<li><span>${h(stamp(e))}</span>${h(EVENT[e.kind] || e.kind)}${e.detail && e.detail.reason ? `: ${h(e.detail.reason)}` : ''}</li>`).join('')}</ol>
+      <ol class="timeline">${r.events.map((e) => `<li><span>${h(stamp(e))}</span>${h(EVENT[e.kind] || e.kind)}${eventWhy(e.detail) ? `: ${h(eventWhy(e.detail))}` : ''}</li>`).join('')}</ol>
       ${r.answers.length ? `<h3 class="sub-h">Your answers</h3>${r.answers.map((a) => `<div class="qa"><b>${h(a.question)}</b><p>${h(a.answer)}</p></div>`).join('')}` : ''}
       <h3 class="sub-h">The posting, as saved${r.saved_at ? ` ${h(shortDate(r.saved_at))}` : ''}</h3>
       ${r.description ? `<pre class="saved">${h(r.description)}</pre>` : '<p class="small">No copy saved yet; it\'s fetched in the background after you apply. The link above still works while the posting is up.</p>'}`;
@@ -873,17 +911,61 @@ function postingHTML(r) {
 
 // ---------------------------------------------------------------- events
 
+// What you type in an answer is held in `unsaved` until the server has it, so a redraw, a refresh of the list or
+// a failed save can't lose it: it is shown from here, sent again every few seconds, and marked "Not saved yet".
+const SAVE_RETRY_MS = 5000;
 const saveTimers = {};
-function saveAnswer(ta) {
-  clearTimeout(saveTimers[ta.id]);
-  saveTimers[ta.id] = setTimeout(async () => {
-    try {
-      await post(`/api/job/${encodeURIComponent(ta.dataset.job)}/answer`, { qkey: ta.dataset.qkey, text: ta.value });
-      const job = STATE.jobs.find((j) => j.id === ta.dataset.job);
-      const q = job && job.questions.find((x) => x.qkey === ta.dataset.qkey);
-      if (q) { q.answer = ta.value; q.edited = true; }
-    } catch (e) { toast(`Couldn't save: ${e.message}`); }
-  }, 600);
+
+function questionOf(job, qkey) {
+  const j = STATE && STATE.jobs.find((x) => x.id === job);
+  return j && j.questions.find((x) => x.qkey === qkey);
+}
+
+function keepUnsaved() {
+  for (const u of Object.values(unsaved)) {
+    const q = questionOf(u.job, u.qkey);
+    if (q) { q.answer = u.text; q.edited = true; }
+  }
+}
+
+// The server said no (the question left this job): trying again won't help, so the text stays here marked as such.
+const unsavedNote = (u) => (u && u.refused ? `Not saved: ${u.refused}` : 'Not saved yet. Trying again…');
+
+function dropUnsaved(k) {
+  clearTimeout(saveTimers[k]);
+  delete unsaved[k];
+}
+
+function saveAnswer(ta, wait = 600) {
+  const k = `${ta.dataset.job}|${ta.dataset.qkey}`;
+  const u = unsaved[k] || (unsaved[k] = { job: ta.dataset.job, qkey: ta.dataset.qkey });
+  u.text = ta.value;
+  keepUnsaved();
+  clearTimeout(saveTimers[k]);
+  saveTimers[k] = setTimeout(() => sendAnswer(k), wait);
+}
+
+async function sendAnswer(k) {
+  clearTimeout(saveTimers[k]);
+  const u = unsaved[k];
+  if (!u || u.sending) return;  // the request in flight sends the rest when it comes back
+  const text = u.text;
+  u.sending = true;
+  let error = null;
+  try {
+    await post(`/api/job/${encodeURIComponent(u.job)}/answer`, { qkey: u.qkey, text });
+  } catch (e) {
+    error = e;
+    if (!u.failed) toast(`Couldn't save your answer: ${e.message}`, 6000);
+  }
+  u.sending = false;
+  if (unsaved[k] !== u) return;  // a redraft replaced the answer meanwhile
+  u.failed = !!error;
+  u.refused = error && error.status >= 400 && error.status < 500 ? error.message : '';
+  if (!error && u.text === text) delete unsaved[k];
+  else if (!u.refused || u.text !== text) saveTimers[k] = setTimeout(() => sendAnswer(k), error ? SAVE_RETRY_MS : 0);
+  const flag = document.querySelector(`[data-unsaved="${CSS.escape(k)}"]`);
+  if (flag) { flag.textContent = unsavedNote(u); flag.hidden = !error; }
 }
 
 document.addEventListener('input', (e) => {
@@ -893,10 +975,23 @@ document.addEventListener('input', (e) => {
   const counter = document.querySelector(`[data-count="${ta.id}"]`);
   if (counter) counter.innerHTML = countText(ta.value, limitOf(ta.dataset.limit));
   saveAnswer(ta);
+  const checks = document.querySelector(`[data-checks="${ta.id}"]`);
+  const q = questionOf(ta.dataset.job, ta.dataset.qkey);
+  if (checks && q) checks.innerHTML = checksHTML(q);
 });
 
 document.addEventListener('focusout', (e) => {
+  const ta = e.target.closest && e.target.closest('textarea[data-qkey]');
+  if (ta) sendAnswer(`${ta.dataset.job}|${ta.dataset.qkey}`);  // don't sit on the last words
   if (e.target.matches('#tab-today textarea') && pendingRender) setTimeout(render, 50);
+});
+
+// Closing the tab mid-sentence: send what's left without waiting for the reply.
+window.addEventListener('pagehide', () => {
+  for (const u of Object.values(unsaved)) {
+    fetch(`/api/job/${encodeURIComponent(u.job)}/answer`, { method: 'POST', keepalive: true,
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ qkey: u.qkey, text: u.text }) }).catch(() => {});
+  }
 });
 
 document.addEventListener('toggle', (e) => {
@@ -979,10 +1074,7 @@ document.addEventListener('click', async (e) => {
     if (previous[k] == null) return;
     ta.value = previous[k];
     delete previous[k];
-    saveAnswer(ta);
-    const job = STATE.jobs.find((x) => x.id === ta.dataset.job);
-    const q = job && job.questions.find((x) => x.qkey === ta.dataset.qkey);
-    if (q) { q.answer = ta.value; q.edited = true; }
+    saveAnswer(ta, 0);
     render();
     toast('Previous version put back');
     return;
@@ -990,6 +1082,7 @@ document.addEventListener('click', async (e) => {
   if (t.dataset.redraft) {
     const res = await post(`/api/job/${encodeURIComponent(t.dataset.redraft)}/redraft`);
     if (!res.started) { toast('Busy right now; try again in a moment'); return; }
+    Object.keys(unsaved).filter((k) => unsaved[k].job === t.dataset.redraft).forEach(dropUnsaved);  // replaced by the new drafts
     toast('Redrafting from your resume…');
     startPolling();
   }

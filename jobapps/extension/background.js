@@ -25,7 +25,57 @@ async function fillTab(tabId) {
   try { await chrome.tabs.sendMessage(tabId, { type: 'fill' }); } catch (e) { /* no listener in this tab */ }
 }
 
+// Which of today's jobs each tab is working on. An application often continues on another site (a career page
+// hands you to its ATS, Workday shows your candidate home after you submit): pages there still belong to that job,
+// for the timer and for "applied". Only a page of the same company inherits it, for 3 hours after the last use.
+const TAB_JOB_MS = 3 * 60 * 60 * 1000;
+// Words that don't tell one employer from another: parts of an address, sites that host many employers' applications
+// (two companies on taleo.net are not the same company), and words many company names share.
+const COMMON = new Set(['www', 'careers', 'career', 'jobs', 'job', 'apply', 'campus', 'com', 'ca', 'net', 'org', 'io', 'ai', 'co',
+  'myworkdayjobs', 'myworkdaysite', 'icims', 'eightfold', 'oraclecloud', 'workable', 'greenhouse', 'lever', 'ashbyhq',
+  'smartrecruiters', 'bamboohr', 'jobvite', 'rippling', 'boards', 'board', 'hcm', 'fa', 'ocs', 'en', 'us', 'inc', 'ltd',
+  'taleo', 'successfactors', 'sapsf', 'adp', 'workforcenow', 'ultipro', 'ukg', 'dayforce', 'dayforcehcm', 'csod', 'avature',
+  'phenompeople', 'recruitee', 'teamtailor', 'breezy', 'pinpointhq', 'applytojob', 'jazzhr', 'paylocity', 'paycomonline',
+  'brassring', 'njoyn', 'linkedin', 'indeed', 'glassdoor', 'ziprecruiter', 'wellfound', 'simplify', 'joinhandshake',
+  'symplicity', 'ripplematch', 'recruiting', 'recruit', 'talent', 'hire', 'hiring', 'candidate', 'candidates', 'portal',
+  'login', 'auth', 'secure', 'account', 'accounts', 'app', 'apps', 'site', 'sites', 'pages', 'web', 'online', 'cloud',
+  'corp', 'corporation', 'company', 'group', 'llc', 'limited', 'technologies', 'technology', 'tech', 'systems', 'solutions',
+  'software', 'services', 'labs', 'lab', 'digital', 'data', 'global', 'international', 'canada', 'the', 'and']);
+const tokens = (text) => (String(text || '').toLowerCase().match(/[a-z0-9]+/g) || [])
+  .filter((t) => t.length >= 3 && !COMMON.has(t) && !/^wd\d+$/.test(t));
+
+async function tabJob(tabId, host) {
+  const key = `tab:${tabId}`;
+  const rec = (await chrome.storage.session.get(key))[key];
+  if (!rec || Date.now() - rec.at > TAB_JOB_MS) return null;
+  const mine = new Set([...rec.hosts.flatMap(tokens), ...tokens(rec.company)]);
+  return tokens(host).some((t) => mine.has(t)) ? { jobId: rec.jobId, age: Date.now() - rec.at } : null;
+}
+
+async function setTabJob(tabId, job, host) {
+  const key = `tab:${tabId}`;
+  const rec = (await chrome.storage.session.get(key))[key];
+  const hosts = rec && rec.jobId === job.id ? [...new Set([...rec.hosts, host])].slice(-6) : [host];
+  await chrome.storage.session.set({ [key]: { jobId: job.id, company: job.company, hosts, at: Date.now() } });
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => { chrome.storage.session.remove(`tab:${tabId}`).catch(() => {}); });
+chrome.tabs.onCreated.addListener(async (tab) => {  // a window the application opens (sign-in, ATS) is the same job
+  if (!tab.openerTabId) return;
+  const rec = (await chrome.storage.session.get(`tab:${tab.openerTabId}`))[`tab:${tab.openerTabId}`];
+  if (rec) await chrome.storage.session.set({ [`tab:${tab.id}`]: rec });
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
+  const tabId = sender && sender.tab && sender.tab.id;
+  if (msg && msg.type === 'tab-job') {
+    tabJob(tabId, msg.host).then((r) => reply(r || { jobId: null }), () => reply({ jobId: null }));
+    return true;
+  }
+  if (msg && msg.type === 'tab-job-set') {
+    if (tabId && msg.job && msg.job.id) setTabJob(tabId, msg.job, msg.host).catch(() => {});
+    return false;
+  }
   if (msg && msg.type === 'api') {
     call(msg.path, msg.body, msg.method).then(
       (data) => reply({ ok: true, data }),

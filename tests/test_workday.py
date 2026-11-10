@@ -26,9 +26,9 @@ PROFILE = Profile({
 JOB = {"company": "Trimble", "locations": ["Richmond Hill, Canada"]}
 
 
-def act(label, type="text", section="", value=None, required=True, **extra):
+def act(label, type="text", section="", value=None, required=True, profile=PROFILE, **extra):
     f = {"id": "1", "label": label, "type": type, "required": required, "section": section, "value": value, **extra}
-    return plan.action(f, Resolver(PROFILE, JOB).resolve(plan.to_field(f)))
+    return plan.action(f, Resolver(profile, JOB).resolve(plan.to_field(f)))
 
 
 def test_sections_and_dates_parse():
@@ -90,8 +90,8 @@ def test_websites_skills_and_my_information():
     heard = act("How Did You Hear About Us?", "multiselect")
     assert heard["items"] == [["Job board", "LinkedIn"]] and heard["pick_first"]
     assert act("I have a preferred name", "boolean")["op"] is None
-    signed = act("Date", "date", parts=["month", "day", "year"])
-    assert signed["parts"] == {"month": date.today().month, "day": date.today().day, "year": date.today().year}
+    before, signed, after = date.today(), act("Date", "date", parts=["month", "day", "year"])["parts"], date.today()
+    assert signed in [{"month": d.month, "day": d.day, "year": d.year} for d in (before, after)]  # either side of midnight
 
 
 def test_skill_matching_is_strict():
@@ -112,4 +112,10 @@ def test_long_yes_no_options_and_graduation_question():
     assert choose_option("decline", opts) == opts[2]
     sponsor = ["I will require sponsorship", "I will not require sponsorship"]
     assert choose_option(False, sponsor) == sponsor[1]
-    assert act("How long ago was your date of graduation?", "dropdown")["candidates"][0] == "Not yet graduated"
+    def graduating(year):  # the answer depends on the year the test runs in, so the profile's year is set from it
+        education = {**PROFILE.data["education"], "graduation_year": year}
+        return act("How long ago was your date of graduation?", "dropdown",
+                   profile=Profile({**PROFILE.data, "education": education}, root=Path(".")))
+
+    assert graduating(date.today().year + 1)["candidates"][0] == "Not yet graduated"
+    assert graduating(date.today().year - 1)["state"] == "missing"   # you've graduated: yours to answer

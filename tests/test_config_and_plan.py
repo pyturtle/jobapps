@@ -56,3 +56,26 @@ def test_plan_uses_the_shared_resolver():
         {"id": "2", "type": "textarea", "label": "Why do you want this job?", "value": ""},
     ])
     assert out[0]["text"] == "Ada" and out[1]["state"] == "manual"   # optional + no draft yet -> left for you
+
+
+def test_a_page_that_says_the_application_went_in():
+    import re
+    from pathlib import Path
+    from jobapps.plan import NOT_YET, SUBMITTED, SUBMITTED_PATH, says_submitted
+    for text in ("Thank you for applying to Acme!", "Application submitted", "Your application has been received.",
+                 "We have received your application", "Your application is in!\nWe will be in touch."):
+        assert says_submitted(text), text
+    for text in ("Your application is incomplete", "Your application is in progress",
+                 "Once your application has been submitted, you will get an email.",
+                 "After we have received your application, a recruiter reviews it.",
+                 "Application completion takes about ten minutes.", "Submit application"):
+        assert not says_submitted(text), text
+    assert says_submitted("If you need help, write to us.\nThanks for applying")  # the "if" is another sentence
+    for path in ("/acme/thanks", "/jobs/123/confirmation", "/apply/thank-you/", "/application/submitted"):
+        assert SUBMITTED_PATH.search(path), path
+    for path in ("/jobs/customer-success-intern/apply", "/careers/confirm-your-email/step-2", "/thankful/apply", "/jobs/123"):
+        assert not SUBMITTED_PATH.search(path), path
+    # the extension keeps its own copy of the two patterns
+    js = (Path(__file__).parent.parent / "jobapps" / "extension" / "content.js").read_text(encoding="utf-8")
+    assert re.search(r"const SUBMITTED = /(.+)/gi;", js).group(1) == SUBMITTED.pattern
+    assert re.search(r"const NOT_YET = /(.+)/i;", js).group(1) == NOT_YET.pattern

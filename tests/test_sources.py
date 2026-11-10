@@ -50,9 +50,12 @@ def test_board_helpers():
     assert _terms_from_title("Software Engineer Intern - Summer 2027 (4 months)") == ["Summer 2027"]
     assert _terms_from_title("Co-op, Fall/Winter 2027") == ["Winter 2027"]
     assert _terms_from_title("Autumn 2027 Placement") == ["Fall 2027"]
-    import time
-    assert abs(_ago("Posted 3 Days Ago") - (time.time() - 3 * 86400)) < 5
-    assert abs(_ago("Posted Today") - time.time()) < 5
+    from datetime import date, datetime
+    day = date(2026, 11, 9)  # whatever second the board is read, a posting gets the start of its day
+    assert _ago("Posted 3 Days Ago", day) == int(datetime(2026, 11, 6).timestamp())
+    assert _ago("Posted Today", day) == int(datetime(2026, 11, 9).timestamp())
+    assert _ago("Posted Yesterday", day) == int(datetime(2026, 11, 8).timestamp())
+    assert _ago("Posted 30+ Days Ago", day) == int(datetime(2026, 10, 10).timestamp())
     for t in ("Software Developer, Co-op", "ML Intern", "Summer Analyst", "PEY Student - Data", "Software Engineering Internship"):
         assert STUDENT_TITLE.search(t), t
     for t in ("Senior Software Engineer", "Internal Tools Engineer", "International Sales", "Battery Replacement Tech"):
@@ -113,6 +116,30 @@ def test_parse_dreamwork_country_filter():
     ]}
     rows = parse_dreamwork(data, "CA")
     assert len(rows) == 1 and rows[0]["company_name"] == "Rivianvw" and rows[0]["date_posted"] > 0
+
+
+def test_a_listing_keeps_its_first_date_while_it_stays_up(tmp_path):
+    from jobapps import db
+    conn = db.connect(tmp_path / "t.db")
+
+    def listing(posted, active=True):
+        return {"id": "a", "source": "board:Acme", "company": "Acme", "title": "Software Intern", "ats": "workday",
+                "url": "https://acme.example/1", "locations": ["Toronto, ON"], "terms": [], "category": "",
+                "sponsorship": "", "degrees": [], "date_posted": posted, "active": active}
+
+    def posted():
+        return conn.execute("SELECT date_posted FROM listings").fetchone()["date_posted"]
+
+    db.upsert_listings(conn, [listing(1000)], False)
+    db.upsert_listings(conn, [listing(5000)], False)  # "Posted 30+ Days Ago" again on a later day
+    assert posted() == 1000
+    db.upsert_listings(conn, [listing(0)], False)
+    assert posted() == 1000
+    db.upsert_listings(conn, [listing(400)], False)  # another feed knows an earlier date
+    assert posted() == 400
+    db.upsert_listings(conn, [listing(400, active=False)], False)
+    db.upsert_listings(conn, [listing(9000)], False)  # taken down, then posted again
+    assert posted() == 9000
 
 
 def test_canada_lookalikes():

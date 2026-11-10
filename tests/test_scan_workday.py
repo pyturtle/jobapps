@@ -64,3 +64,27 @@ def test_question_dropdowns_take_their_legend(browser):
     f = scan(browser, 2)
     assert ("", "Are you legally authorized to work in Canada?") in f
     assert all(x["type"] == "dropdown" and x["required"] for x in f.values())
+
+
+PLAIN = """<form>
+  <label for="n">Full name</label><input id="n">
+  <label for="m">First major Question First major</label><input id="m">
+  <fieldset><legend>References</legend>
+    <label for="rn">Name</label><input id="rn">
+    <label for="re">Email</label><input id="re" type="email">
+  </fieldset>
+  <fieldset><legend>Do you have references we may contact?</legend>
+    <label><input type="radio" name="r" value="y">Yes</label><label><input type="radio" name="r" value="n">No</label>
+  </fieldset>
+</form>"""
+
+
+def test_blocks_about_someone_else_and_doubled_labels(browser):
+    page = browser.new_page()
+    page.set_content(PLAIN)
+    page.add_script_tag(content=FILLER)
+    f = {(x["section"], x["label"]) for x in page.evaluate("window.__jobapps.scan()")}
+    page.close()
+    assert {("", "Full name"), ("", "First major")} <= f               # the screen-reader copy is dropped
+    assert {("References", "Name"), ("References", "Email")} <= f      # whose name: the heading says
+    assert ("", "Do you have references we may contact?") in f         # a question, not a block

@@ -3,21 +3,23 @@ name = "jobapps"
 version = "0.2.0"
 description = "Daily batch of fresh job postings, autofilled with your values, with drafted answers."
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "anthropic>=2.3",
-    "playwright>=1.50",
     "pyyaml>=6",
     "pypdf>=5",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+browser = ["playwright>=1.50"]   # only `ja apply` (the Playwright filler) needs it; the extension doesn't
+dev = ["pytest>=8", "playwright>=1.50"]
 
 [project.scripts]
 jobapps = "jobapps.cli:main"
 
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

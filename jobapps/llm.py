@@ -66,10 +66,13 @@ def structured(system: str, user: str, schema: dict, cfg: dict, *, effort: str |
             result = _cli(system, user, schema, cfg["model"], effort, web, budget_usd, cfg.get("timeout_seconds", 600))
         else:
             raise LLMError("no LLM backend available")
-    except LLMError as exc:
-        STATUS.update(last_error=str(exc)[:300], last_error_at=datetime.now().isoformat(timespec="seconds"),
+    except Exception as exc:
+        # Whatever went wrong (the CLI couldn't be started, the reply wasn't the JSON asked for), callers get the one
+        # kind of failure they handle: this call didn't work, the next job's may.
+        error = exc if isinstance(exc, LLMError) else LLMError(f"{type(exc).__name__}: {exc}")
+        STATUS.update(last_error=str(error)[:300], last_error_at=datetime.now().isoformat(timespec="seconds"),
                       failures=STATUS["failures"] + 1)
-        raise
+        raise error from None
     STATUS["last_ok"] = datetime.now().isoformat(timespec="seconds")
     return result
 

@@ -42,10 +42,11 @@ def test_screen_verify_drops_and_downgrades():
             {"requirement": "experience mentoring or teaching others", "kind": "preferred", "status": "met",
              "evidence": "Teaching assistant, intro programming"},
         ],
-        "blockers": [{"quote": "Must be a U.S. citizen", "reason": "citizenship"}],  # not in posting -> ignored
+        "blockers": [{"quote": "Must be a U.S. citizen", "reason": "citizenship", "kind": "citizenship"}],  # not in posting -> ignored
         "summary": "Solid web match.",
     }
     v = screen.verify(raw, POSTING, RESUME)
+    assert v["concerns"] == []
     statuses = {r["requirement"][:21]: r["status"] for r in v["requirements"]}
     assert statuses["Experience building w"] == "met"
     assert statuses["Familiarity with Kube"] == "missing"
@@ -53,3 +54,19 @@ def test_screen_verify_drops_and_downgrades():
     assert v["blockers"] == []
     assert v["fit"] == round(100 * (1 + 0 + 0.4) / 2.4)
     assert screen.verdict(v["fit"]) == "good"  # 58/100
+
+
+def test_screen_rules_out_only_for_the_hard_reasons():
+    posting = POSTING + ("\nYou must be enrolled in a master's or PhD program."
+                         "\nThis is a 16-month placement starting in May 2027."
+                         "\nCandidates should be comfortable working in a fast-paced environment.")
+    raw = {"requirements": [], "summary": "", "blockers": [
+        {"quote": "You must be enrolled in a master's or PhD program.", "reason": "graduate students only", "kind": "degree_level"},
+        {"quote": "This is a 16-month placement starting in May 2027.", "reason": "longer than your term", "kind": "other"},
+        {"quote": "Candidates should be comfortable working in a fast-paced environment.", "reason": "no evidence"},  # no kind
+    ]}
+    v = screen.verify(raw, posting, RESUME)
+    assert [b["reason"] for b in v["blockers"]] == ["graduate students only"]
+    assert [b["reason"] for b in v["concerns"]] == ["longer than your term", "no evidence"]  # shown, never acted on
+    assert "other" not in screen.HARD and set(screen.SCHEMA["properties"]["blockers"]["items"]["properties"]["kind"]["enum"]) \
+        == {*screen.HARD, "other"}

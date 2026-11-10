@@ -149,7 +149,11 @@
     return !!(cont && cont.querySelector('[class*="required" i]'));
   }
 
-  // Heading of the repeated block a field sits in ("Work Experience 2", "Education 1"); '' if none.
+  // Blocks that ask about someone else: their name, email and phone are never yours.
+  const OTHER_PERSON = /\b(references?|referees?|emergency contacts?|next of kin|guardians?|spouse|dependents?|beneficiar(y|ies))\b/i;
+
+  // Heading of the block a field sits in when the heading changes what its labels mean: a repeated block
+  // ("Work Experience 2", "Education 1") or one about another person ("References"); '' if none.
   function sectionOf(el) {
     for (let n = el.parentElement, d = 0; n && d < 18; n = n.parentElement, d++) {
       if (!n.matches('[role="group"], fieldset, section')) continue;
@@ -161,6 +165,7 @@
         head = hd ? clean(hd.textContent) : '';
       }
       if (head.length < 60 && /\S\s+\d{1,2}$/.test(head)) return head;
+      if (head.length < 40 && !head.includes('?') && OTHER_PERSON.test(head)) return head;
     }
     return '';
   }
@@ -350,7 +355,7 @@
       // "Full name ✱" -> "Full name" (required was already worked out from the marker above)
       f.label = f.label.replace(/\s*[✱*]+\s*/g, ' ').replace(/\s+\(?(required|optional)\)?\s*$/i, '').trim();
       // Screen-reader copies: "First major Question First major" -> "First major"
-      const twice = /^(.{3,120}?)\s+(?:question\s+)?$/i.exec(f.label);
+      const twice = /^(.{3,120}?)\s+(?:question\s+)?\1$/i.exec(f.label);
       if (twice) f.label = twice[1];
       const el = document.querySelector(`[${ATTR}="${f.id}"]`);
       f.section = el ? sectionOf(el) : '';
