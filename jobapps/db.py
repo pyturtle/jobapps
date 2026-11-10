@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS picks (            -- why each job was chosen, frozen
     PRIMARY KEY (date, job_id)
 );
 CREATE TABLE IF NOT EXISTS events (           -- permanent record: picked, carried, added, released, ruled_out,
-    id INTEGER PRIMARY KEY AUTOINCREMENT,      -- opened, applied, skipped, closed, reopened. Never deleted.
+    id INTEGER PRIMARY KEY AUTOINCREMENT,      -- rechecked, opened, applied, skipped, closed, reopened. Never deleted.
     job_id TEXT, kind TEXT, at TEXT, day TEXT, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS events_job ON events(job_id);

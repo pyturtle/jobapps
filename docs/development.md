@@ -8,7 +8,7 @@ python -m venv .venv
 .venv\Scripts\python -m pytest
 ```
 
-The suite has 157 tests and runs in a few seconds. `tests/test_scan_workday.py` drives a real browser
+The suite has 160 tests and runs in a few seconds. `tests/test_scan_workday.py` drives a real browser
 against `tests/fixtures/workday_mock.html` and is skipped when Playwright has no browser. To run it:
 
 ```powershell
@@ -68,7 +68,8 @@ values: it sends the fields it found to the server, and `plan` and `rules` answe
   for them, and never answer them from a remembered answer.
 - A consent box or declaration is never ticked.
 - A wrong rule-out is worse than a missed one: a posting ruled out is never shown again. A fit rule
-  should fire only on wording it is sure of.
+  should fire only on wording it is sure of. After loosening a rule, `ja recheck` puts back the
+  postings it had stopped.
 - Nothing presses a Submit button.
 - The `events` table is a permanent log. Add rows; don't delete or rewrite them.
 - Ranking and fit scoring use no model. The same postings, config and date must give the same

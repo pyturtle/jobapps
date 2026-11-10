@@ -100,6 +100,7 @@ Run these from the project folder with `.\ja` on Windows, or `python -m jobapps`
 | `ja done N` / `ja skip N` | mark job N applied, or drop it from the list |
 | `ja redraft N` | throw away job N's drafted answers and draft them again |
 | `ja skills` | the skills the fit check found in your resume |
+| `ja recheck [--dry-run]` | put back postings ruled out on an earlier day that today's rules would let through |
 | `ja fetch` | refresh the listings now |
 | `ja report` | rebuild and open today's HTML report |
 | `ja history [--limit N]` | recent applications |

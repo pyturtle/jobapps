@@ -31,6 +31,9 @@ def _event_summary(conn) -> dict[str, dict]:
         elif kind == "ruled_out":
             e["ruled_out"] = (json.loads(r["detail"] or "{}") or {}).get("reason") or "ruled out"
             e["ruled_day"] = r["day"]
+        elif kind == "rechecked":  # back in the running after a rule changed (pipeline.recheck)
+            e.pop("ruled_out", None)
+            e.pop("ruled_day", None)
         elif kind == "released":
             e["released"] = r["day"]
         elif kind in ("applied", "skipped", "closed"):

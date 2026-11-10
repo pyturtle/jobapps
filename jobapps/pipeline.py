@@ -165,11 +165,28 @@ def is_repeat(job: dict, seen_jobs: dict[str, list]) -> bool:
                for theirs in seen_jobs.get(same_job_key(job["company"], job["title"]), ()))
 
 
+def ruled_out(conn) -> dict[str, str]:
+    """Postings that are ruled out now, with the reason: each one's last rule-out, unless it has been checked
+    again since (see recheck)."""
+    out: dict[str, str] = {}
+    for r in conn.execute("SELECT job_id, kind, detail FROM events WHERE kind IN ('ruled_out', 'rechecked') ORDER BY id"):
+        if r["kind"] == "rechecked":
+            out.pop(r["job_id"], None)
+        else:
+            out[r["job_id"]] = (json.loads(r["detail"] or "{}") or {}).get("reason") or ""
+    return out
+
+
+def ever_listed(conn) -> set[str]:
+    """Postings you've had on a list, whatever came of them."""
+    return db.tracked_ids(conn) | {r[0] for r in conn.execute(
+        "SELECT DISTINCT job_id FROM events WHERE kind IN ('picked', 'carried', 'added', 'released')")}
+
+
 def already_seen(conn) -> tuple[set[str], dict[str, list]]:
-    """Postings you've had (any list, any outcome) or that were ruled out, and those roles by same-job key with the
+    """Postings you've had (any list, any outcome) or that are ruled out, and those roles by same-job key with the
     towns of each posting, so the same role under another link isn't read, screened or offered again."""
-    ids = db.tracked_ids(conn) | {r[0] for r in conn.execute(
-        "SELECT DISTINCT job_id FROM events WHERE kind IN ('picked', 'carried', 'added', 'released', 'ruled_out')")}
+    ids = ever_listed(conn) | set(ruled_out(conn))
     keys: dict[str, list] = {}
     for job_id in sorted(ids):
         if job := db.get_listing(conn, job_id):
@@ -376,6 +393,32 @@ def build_batch(conn, cfg: dict, profile: Profile, today: date, extra: int = 0, 
     db.set_meta(conn, f"excluded:{key}", json.dumps(previous + excluded))
     if len(chosen) < want:
         log(f"  only {len(chosen)} new job(s) passed (wanted {want}); loosen config.yaml filters for more")
+
+
+def recheck(conn, cfg: dict, profile: Profile, today: date, dry_run: bool = False) -> list[dict]:
+    """Give postings ruled out on an earlier day another chance under today's rules. A ruled-out posting is never
+    read again, so the ones a rule stopped stay hidden after that rule is loosened. This puts back those that were
+    never on a list, are still open, and that neither the filters, the fit rules nor a screen already stored for
+    them would stop today. Each gets a `rechecked` event (the rule-out stays in the record) and is then read and
+    screened by the next daily run like any other posting. Returns them, with the reason each had been ruled out."""
+    background = drafts.background(profile) if drafts.has_material(profile) else ""
+    cand = fit.candidate(profile, background)
+    had, back = ever_listed(conn), []
+    for job_id, reason in ruled_out(conn).items():
+        job = db.get_listing(conn, job_id)
+        # a low verified fit or an old posting with a weak one is a measurement, not a rule that can have misfired
+        if job_id in had or not job or not job["active"] or reason.startswith(("long shot", "posted ")):
+            continue
+        text = (db.get_form(conn, job_id) or {}).get("description") or ""
+        if not text or not picker.evaluate(job, cfg, today).eligible or not fit.evaluate(job, text, cand, cfg, today).eligible:
+            continue
+        if (screen.cached(conn, cfg, background, job, text) or {}).get("blockers"):
+            continue
+        back.append({"id": job_id, "company": job["company"], "title": job["title"], "reason": reason})
+        if not dry_run:
+            db.log_event(conn, job_id, "rechecked", today.isoformat(), {"was": reason})
+    conn.commit()
+    return back
 
 
 def refresh_forms(conn, today: date, everything: bool = False, log=print) -> None:

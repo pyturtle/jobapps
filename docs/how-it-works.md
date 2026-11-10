@@ -82,6 +82,10 @@ Postings. A rule only fires on wording it recognises. A requirement written anot
 and the posting stays in. That is the intended direction: a posting ruled out by mistake is never
 shown again, while one let through by mistake costs you a minute.
 
+When a rule is changed, the postings it stopped earlier stay hidden. `ja recheck` puts back the ones
+that were never on your list, are still open and pass today's filters and fit rules. The next daily
+run reads and screens them like new postings, and the earlier rule-out stays in the record.
+
 The remaining postings are scored on skills. JobApps looks for about 100 named skills (languages,
 frameworks, tools) in the posting's requirements and in your resume, and awards up to
 `fit.skill_points` (30) for the share you have. A deadline within a week adds points. A posting that

@@ -809,7 +809,7 @@ async function loadHistory() {
 // One application's record: its links, your answers, the saved copy of the posting, and what happened when.
 const EVENT = { picked: 'Picked for your list', carried: 'Carried over', added: 'Added by you', released: 'Swapped out by a re-pick',
   ruled_out: 'Ruled out', opened: 'Opened', applied: 'Applied', skipped: 'Skipped', closed: 'Posting closed', reopened: 'Undone',
-  corrected: 'Record corrected' };
+  corrected: 'Record corrected', rechecked: 'Checked again after a rule changed' };
 const eventWhy = (d) => (d ? d.reason || d.why || d.dropped || '' : '');
 
 async function toggleRecord(btn) {

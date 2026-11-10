@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 import pytest
 
-from jobapps import db, pipeline, screen
+from jobapps import db, pipeline, records, screen
 from jobapps.config import Profile, load_config
 
 TODAY = date(2026, 11, 2)
@@ -109,3 +109,51 @@ def test_companies_in_their_cooldown_are_shortlisted_last(day):
     picked = day.build([listing("acme-2", "Acme", days=0, title="Software Developer Intern"),
                         listing("zeta", "Zeta", days=9)], cfg)
     assert day.read == ["zeta"] and picked == ["zeta"]   # the only place goes to the company you haven't had
+
+
+def test_recheck_puts_back_only_what_todays_rules_let_through(day):
+    """A ruled-out posting is never read again, so one stopped by a rule that has since been fixed needs putting back."""
+    cfg = day.config(daily_count=5)
+    posts = [listing("misread", "Acme"), listing("grads", "Globex"), listing("had", "Initech"), listing("gone", "Hooli"),
+             listing("weak", "Zeta"), listing("unread", "Birch")]
+    posts[3]["active"] = False
+    db.upsert_listings(day.conn, posts, False)
+    for p in posts[:5]:                                         # "unread" has no stored text to check
+        grads = "You must be currently enrolled in a Master's or PhD program.\n" if p["id"] == "grads" else ""
+        db.save_form(day.conn, p["id"], "greenhouse", POSTING + grads, [])
+    for job_id, reason in (("misread", "asks for 22+ years of experience"), ("grads", "graduate students only"),
+                           ("had", "application deadline Oct 01, 2026 has passed"), ("gone", "asks for 5+ years of experience"),
+                           ("weak", "long shot (verified fit 20/100)"), ("unread", "asks for 5+ years of experience")):
+        db.log_event(day.conn, job_id, "ruled_out", "2026-10-30", {"reason": reason})
+    db.log_event(day.conn, "had", "added", "2026-10-31")       # you put this one on a list yourself afterwards
+
+    assert [b["id"] for b in pipeline.recheck(day.conn, cfg, Profile({}), TODAY, dry_run=True)] == ["misread"]
+    assert "misread" in pipeline.already_seen(day.conn)[0]     # a dry run changes nothing
+    back = pipeline.recheck(day.conn, cfg, Profile({}), TODAY)
+    assert [(b["id"], b["reason"]) for b in back] == [("misread", "asks for 22+ years of experience")]
+    assert [e["kind"] for e in db.events_for(day.conn, "misread")] == ["ruled_out", "rechecked"]   # the record keeps both
+    assert pipeline.already_seen(day.conn)[0] == {"grads", "had", "gone", "weak", "unread"}
+    status = {r["id"]: r["status"] for r in records.postings(day.conn)["rows"]}
+    assert status["misread"] == "not_picked" and status["grads"] == "ruled_out"
+    assert pipeline.recheck(day.conn, cfg, Profile({}), TODAY) == []   # nothing left to put back
+    assert day.build([], cfg) == ["misread"]                           # the next daily list reads it like a new posting
+
+
+def test_recheck_leaves_what_a_stored_screen_still_rules_out(day):
+    cfg = day.config()
+    db.upsert_listings(day.conn, [listing("a", "Acme")], False)
+    db.save_form(day.conn, "a", "greenhouse", POSTING, [])
+    db.log_event(day.conn, "a", "ruled_out", "2026-10-30", {"reason": "Claude: you need a work permit for this role"})
+    model = screen._model_cfg(cfg)["model"]
+    stored = {"fit": 70, "verdict": "good", "requirements": [],
+              "blockers": [{"kind": "work_authorization", "reason": "you need a work permit", "quote": "work permit"}]}
+    db.save_screen(day.conn, "a", screen.input_hash(model, BACKGROUND, POSTING), model, stored)
+    assert pipeline.recheck(day.conn, cfg, Profile({}), TODAY) == []   # the same screen would only rule it out again
+
+
+def test_a_posting_ruled_out_again_after_a_recheck_stays_out(day):
+    db.upsert_listings(day.conn, [listing("a", "Acme")], False)
+    for kind in ("ruled_out", "rechecked", "ruled_out"):
+        db.log_event(day.conn, "a", kind, "2026-10-30", {"reason": "graduate students only"})
+    assert pipeline.already_seen(day.conn)[0] == {"a"}
+    assert records.postings(day.conn)["rows"][0]["status"] == "ruled_out"

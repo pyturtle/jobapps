@@ -8,6 +8,7 @@
   ja explain N  why job N was picked and how each field will be filled
   ja redraft N  throw away job N's drafted answers and draft again
   ja skills     what the fit check reads from your resume
+  ja recheck    put back postings that an older rule ruled out and today's rules wouldn't
   ja fetch      refresh listings now      ja doctor     check your setup
 """
 from __future__ import annotations
@@ -223,6 +224,14 @@ def cmd_skills(args, conn, cfg, profile, today):
     log("Add or remove skills with skills.extra / skills.exclude in profile.yaml.")
 
 
+def cmd_recheck(args, conn, cfg, profile, today):
+    back = pipeline.recheck(conn, cfg, profile, today, dry_run=args.dry_run)
+    for b in back:
+        log(f"  {b['company']} - {b['title'][:50]}: was {b['reason'][:80]}")
+    log(f"{len(back)} ruled-out posting(s) pass today's rules" +
+        ("; nothing changed (dry run)." if args.dry_run else " and are back in the running for the next daily list."))
+
+
 def cmd_fetch(args, conn, cfg, profile, today):
     pipeline.fetch(conn, cfg, log)
 
@@ -281,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("redraft", help="re-draft a job's answers")
     p.add_argument("ref")
     sub.add_parser("skills", help="what the fit check reads from your resume")
+    p = sub.add_parser("recheck", help="put back ruled-out postings that today's rules would let through")
+    p.add_argument("--dry-run", action="store_true", help="only show them")
     sub.add_parser("fetch", help="refresh listings")
     sub.add_parser("report", help="rebuild and open today's HTML report")
     p = sub.add_parser("history", help="recent applications")
@@ -296,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     conn = db.connect()
     handlers = {
         "serve": cmd_serve, "today": cmd_today, "apply": cmd_apply, "status": cmd_status, "explain": cmd_explain,
-        "redraft": cmd_redraft, "skills": cmd_skills, "fetch": cmd_fetch, "report": cmd_report,
+        "redraft": cmd_redraft, "skills": cmd_skills, "recheck": cmd_recheck, "fetch": cmd_fetch, "report": cmd_report,
         "history": cmd_history, "doctor": cmd_doctor,
         "done": lambda *a: _set_status(*a, "applied"), "skip": lambda *a: _set_status(*a, "skipped"),
     }
