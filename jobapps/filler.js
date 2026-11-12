@@ -452,6 +452,11 @@
   `;
   const panelState = { minimized: false, closed: false };
   let panelSheet = null;
+  // The panel's element and its shadow root. The root is closed, so scripts on the job site can't reach the
+  // panel's buttons; we keep our own references instead of looking it up in the page.
+  let panelHost = null;
+  let panelRoot = null;
+  const panelShown = () => !!(panelHost && panelHost.isConnected);
 
   function h(tag, attrs = {}, ...children) {
     const el = document.createElement(tag);
@@ -474,13 +479,20 @@
 
   // data: {title, subtitle?, filled, drafts, todo: [{id,label,required,note}], drafted?: [{id,label}], note?,
   //        buttons?: [{id,label,primary?}], inFrame?, done?, reopen?}
-  // Buttons dispatch a 'jobapps-action' event on window with the button id.
+  // A button press calls window.__jobapps.onAction(id), which content.js sets. That callback lives in the
+  // extension's isolated world: a script on the page can neither call it nor fake a press (no window event, a
+  // closed shadow root, and only real clicks count). Closing the panel calls it with 'close'.
+  function act(id, e) {
+    if (e && e.isTrusted === false) return;
+    const fn = window.__jobapps && window.__jobapps.onAction;
+    if (typeof fn === 'function') fn(id);
+  }
   let lastPanel = null;
   let follower = null;
 
   // Some sites (Remix/React apps that render the whole document) remove nodes they didn't create.
   function ensurePanel() {
-    if (lastPanel && !panelState.closed && !document.querySelector('[data-jobapps-panel]')) panel({ ...lastPanel, reopen: false });
+    if (lastPanel && !panelState.closed && !panelShown()) panel({ ...lastPanel, reopen: false });
   }
 
   // Inside an embedded form (a tall iframe that never scrolls itself) "position: fixed" means the
@@ -488,6 +500,17 @@
   // screen from an IntersectionObserver, so keep the panel at the bottom of that visible part.
   // Observing the whole document only reports changes at its edges, so a column of thin invisible
   // markers tells us which slice is on screen as the outer page scrolls.
+  let followTimer = null;
+  let followRail = null;
+  function unfollow() {
+    if (follower) follower.disconnect();
+    clearInterval(followTimer);
+    if (followRail) followRail.remove();
+    follower = null;
+    followTimer = null;
+    followRail = null;
+  }
+
   function followViewport() {
     if (follower || !('IntersectionObserver' in window)) return;
     const STEP = 80;
@@ -495,8 +518,9 @@
     const rail = document.createElement('div');
     rail.setAttribute('data-jobapps-rail', '');
     rail.style.cssText = 'all:initial;position:absolute;left:0;top:0;width:1px;pointer-events:none;opacity:0;';
+    followRail = rail;
     const place = () => {
-      const host = document.querySelector('[data-jobapps-panel]');
+      const host = panelShown() ? panelHost : null;
       if (!host || !visible.size) return;
       let top = Infinity;
       let bottom = -Infinity;
@@ -527,7 +551,7 @@
       }
     };
     build();
-    setInterval(build, 2000);  // the form grows as conditional questions appear
+    followTimer = setInterval(build, 2000);  // the form grows as conditional questions appear
   }
 
   // An embedded form either scrolls by itself (fixed positioning works) or is sized to its content
@@ -538,21 +562,21 @@
     if (window.top !== window && !data.inFrame) return;
     lastPanel = data;
     if (data.reopen) panelState.closed = false;
-    let host = document.querySelector('[data-jobapps-panel]');
-    if (panelState.closed) { if (host) host.remove(); return; }
-    if (!host) {
-      host = document.createElement('div');
-      host.setAttribute('data-jobapps-panel', '');
-      host.attachShadow({ mode: 'open' });
-      document.documentElement.append(host);
+    if (panelState.closed) { closePanel(); return; }
+    if (!panelHost) {
+      panelHost = document.createElement('div');
+      panelHost.setAttribute('data-jobapps-panel', '');
+      panelRoot = panelHost.attachShadow({ mode: 'closed' });
     }
+    const host = panelHost;
+    if (!host.isConnected) document.documentElement.append(host);  // first time, or the site removed it
     const keepTop = host.style.top;
     const follow = data.inFrame && !frameScrollsItself();
     host.style.cssText = follow
       ? `all:initial;position:absolute;right:16px;top:${keepTop || '12px'};z-index:2147483647;`
       : 'all:initial;position:fixed;right:20px;bottom:20px;z-index:2147483647;';
-    if (follow) followViewport();
-    const root = host.shadowRoot;
+    if (follow) followViewport(); else unfollow();
+    const root = panelRoot;
     if (!panelSheet && 'adoptedStyleSheets' in root) {
       panelSheet = new CSSStyleSheet();
       panelSheet.replaceSync(PANEL_CSS);  // a constructed sheet isn't blocked by the site's CSP
@@ -573,15 +597,16 @@
 
     const total = (data.filled || 0) + (data.drafts || 0) + todo.length;
     const pct = (n) => `${total ? (100 * n) / total : 0}%`;
+    const close = (e) => { closePanel(); act('close', e); };
     const closeBtn = h('button', { class: 'icon', title: 'Close (the JobApps toolbar button brings it back)', 'aria-label': 'Close',
-      onclick: () => { panelState.closed = true; host.remove(); } }, '×');
+      onclick: close }, '×');
     if (data.compact) {  // an offer or a heads-up before any filling: no counts yet
       const head = h('header', {}, h('span', { class: 'mark' }, CHECK()),
         h('div', { class: 'who' }, h('b', {}, data.title || 'JobApps'), h('span', {}, data.subtitle || 'JobApps autofill')), closeBtn);
       const body = h('div', { class: 'body' }, data.note ? h('p', { class: 'note first' }, data.note) : null);
       if (data.buttons && data.buttons.length) {
         body.append(h('div', { class: 'actions' }, ...data.buttons.map((b) => h('button', { class: `btn ${b.primary ? 'primary' : ''}`,
-          onclick: () => window.dispatchEvent(new CustomEvent('jobapps-action', { detail: b.id })) }, b.label))));
+          onclick: (e) => act(b.id, e) }, b.label))));
       }
       root.append(h('section', { class: 'card' }, head, body));
       return;
@@ -591,8 +616,7 @@
       h('div', { class: 'who' }, h('b', {}, data.title || 'JobApps'), h('span', {}, data.subtitle || 'JobApps autofill')),
       h('button', { class: 'icon', title: 'Minimize', 'aria-label': 'Minimize',
         onclick: () => { panelState.minimized = true; panel(data); } }, '–'),
-      h('button', { class: 'icon', title: 'Close (the JobApps toolbar button brings it back)', 'aria-label': 'Close',
-        onclick: () => { panelState.closed = true; host.remove(); } }, '×'));
+      closeBtn);
 
     const body = h('div', { class: 'body' },
       h('div', { class: 'bar', role: 'img', 'aria-label': `${data.filled} filled, ${data.drafts} drafted, ${todo.length} need you` },
@@ -617,7 +641,7 @@
     }
     if (data.buttons && data.buttons.length) {
       body.append(h('div', { class: 'actions' }, ...data.buttons.map((b) => h('button', { class: `btn ${b.primary ? 'primary' : ''}`,
-        onclick: () => window.dispatchEvent(new CustomEvent('jobapps-action', { detail: b.id })) }, b.label))));
+        onclick: (e) => act(b.id, e) }, b.label))));
     }
     body.append(h('p', { class: 'foot' }, data.done
       ? 'Saved on your dashboard.'
@@ -650,9 +674,10 @@
 
   function closePanel() {
     panelState.closed = true;
-    const host = document.querySelector('[data-jobapps-panel]');
-    if (host) host.remove();
+    unfollow();
+    if (panelHost) panelHost.remove();
   }
 
-  window.__jobapps = { scan, count, mark, focus, panel, ensurePanel, closePanel, watch, valueOf };
+  // onAction: set by content.js (see act above).
+  window.__jobapps = { scan, count, mark, focus, panel, ensurePanel, closePanel, watch, valueOf, onAction: null };
 })();

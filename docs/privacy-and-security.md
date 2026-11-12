@@ -35,7 +35,8 @@ JobApps has no telemetry and no account. It makes these outside requests:
   it.
 
 The extension only talks to your own server. The server's address is written into the extension when
-you download it.
+you download it. It runs by itself on the job boards in its manifest and on career sites you allow one
+at a time from its popup. Anywhere else it runs only when you press Alt+J or "Fill this page".
 
 ### What is sent to Claude
 
@@ -90,8 +91,9 @@ Most of these are open in the [issue tracker](https://github.com/pyturtle/jobapp
   one.
 - A tailnet device that has no user login, such as a tagged device, is treated like the PC itself and
   skips the `allowed_logins` check.
-- A page the extension runs on can ask it to scan and fill again. The values it fills are visible to
-  that page, as they are with any autofill. Check which page you are on before you fill.
+- The values the extension fills are visible to the page they go into, as with any autofill. Check
+  which page you are on before you press "Fill this page". The page itself can't press the panel's
+  buttons: they only answer real clicks, and the panel sits in a closed shadow root.
 - The server fetches whatever links the public lists contain. It does not yet refuse links that point
   at addresses on your own network.
 

@@ -8,8 +8,10 @@ python -m venv .venv
 .venv\Scripts\python -m pytest
 ```
 
-The suite has 160 tests and runs in a few seconds. `tests/test_scan_workday.py` drives a real browser
-against `tests/fixtures/workday_mock.html` and is skipped when Playwright has no browser. To run it:
+The suite has 174 tests. Two files drive a real browser and are skipped when Playwright has no browser.
+`tests/test_scan_workday.py` scans `tests/fixtures/workday_mock.html`. `tests/test_extension_browser.py`
+loads the extension zip the server builds into Chromium, on made-up job-board pages against a stand-in
+server, and takes about 40 seconds. The rest runs in a few seconds. To get the browser:
 
 ```powershell
 .venv\Scripts\python -m playwright install chromium

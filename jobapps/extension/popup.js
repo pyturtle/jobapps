@@ -41,6 +41,7 @@ function render(s, error) {
       <div class="bar">${jobs.map((j) => `<span class="${esc(j.status)}"></span>`).join('')}</div></div>`;
     app.innerHTML = `${head}${day}${list}${fill}${foot}`;
   }
+  offerSite();
   document.getElementById('fill').addEventListener('click', async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     await chrome.runtime.sendMessage({ type: 'fill-tab', tabId: tab && tab.id });
@@ -50,6 +51,26 @@ function render(s, error) {
     chrome.tabs.create({ url: b.dataset.url });
     window.close();
   }));
+}
+
+// An application that continues on a company's own career site: offer to run there by itself, as on the job
+// boards (fills each page and counts your time). Chrome asks you to allow that one site.
+async function offerSite() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let url = null;
+  try { url = tab && tab.url ? new URL(tab.url) : null; } catch (e) { url = null; }
+  if (!url || url.protocol !== 'https:') return;
+  const origins = [`${url.origin}/*`];
+  if (await chrome.permissions.contains({ origins }).catch(() => true)) return;
+  const box = document.createElement('div');
+  box.className = 'site';
+  box.innerHTML = `<button class="btn ghost" id="site">Run JobApps on ${esc(url.hostname)}</button>
+    <p class="hint">Fills and times applications on this site by itself, as on the job boards.</p>`;
+  document.querySelector('.cta').after(box);
+  box.querySelector('button').addEventListener('click', async () => {
+    // background.js starts it on this tab once Chrome says yes (this popup may close while Chrome asks).
+    if (await chrome.permissions.request({ origins }).catch(() => false)) window.close();
+  });
 }
 
 state().then((s) => render(s, null), (e) => render(null, e.message));

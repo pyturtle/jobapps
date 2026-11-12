@@ -780,7 +780,7 @@ function statsHTML(st) {
     <div class="tiles">
       <div><b>${st.average} min</b><span>average per application</span></div>
       <div><b>${st.median} min</b><span>median</span></div>
-      <div><b>${duration(st.total_minutes * 60)}</b><span>total, ${st.timed} timed of ${st.applied} applied</span></div>
+      <div><b>${duration(st.total_minutes * 60)}</b><span>total, ${st.timed} timed of ${st.applied} applied${st.estimated ? `, ${st.estimated} of them estimated from opening to applying` : ''}</span></div>
     </div>
     <p class="small">By site: ${site}. Fastest: ${h(st.fastest.company)}, ${st.fastest.minutes} min. Longest: ${h(st.slowest.company)}, ${st.slowest.minutes} min.</p>
   </div>`;
@@ -828,7 +828,7 @@ async function toggleRecord(btn) {
     box.innerHTML = `
       <p class="links"><a href="${h(r.url)}" target="_blank" rel="noopener">The posting</a>
         ${where && where !== r.url ? `<a href="${h(where)}" target="_blank" rel="noopener">The page you applied on</a>` : ''}
-        ${r.minutes ? `<span class="small">${r.minutes} min spent</span>` : ''}</p>
+        ${r.minutes ? `<span class="small">${r.estimated ? `about ${r.minutes} min spent (from opening it to applying)` : `${r.minutes} min spent`}</span>` : ''}</p>
       <ol class="timeline">${r.events.map((e) => `<li><span>${h(stamp(e))}</span>${h(EVENT[e.kind] || e.kind)}${eventWhy(e.detail) ? `: ${h(eventWhy(e.detail))}` : ''}</li>`).join('')}</ol>
       ${r.answers.length ? `<h3 class="sub-h">Your answers</h3>${r.answers.map((a) => `<div class="qa"><b>${h(a.question)}</b><p>${h(a.answer)}</p></div>`).join('')}` : ''}
       <h3 class="sub-h">The posting, as saved${r.saved_at ? ` ${h(shortDate(r.saved_at))}` : ''}</h3>
@@ -899,7 +899,7 @@ function postingHTML(r) {
   const places = r.locations.slice(0, 2).join(' / ') + (r.locations.length > 2 ? ` +${r.locations.length - 2}` : '');
   const meta = [places, BOARD[r.ats] || r.ats, r.first_seen ? `seen ${shortDate(r.first_seen)}` : '', r.active ? '' : 'no longer listed'].filter(Boolean);
   const when = r.done_at ? shortDate(r.done_at) : r.listed_on ? `listed ${shortDate(r.listed_on)}` : '';
-  const sub = [when, r.minutes ? `${r.minutes} min` : '', r.how === 'added' ? 'added by you' : ''].filter(Boolean).join(', ');
+  const sub = [when, r.minutes ? `${r.estimated ? 'about ' : ''}${r.minutes} min` : '', r.how === 'added' ? 'added by you' : ''].filter(Boolean).join(', ');
   return `<div class="prow">
     <div class="pmain"><a class="co" href="${h(r.url)}" target="_blank" rel="noopener">${h(r.company)}</a><span class="ti">${h(r.title)}</span>
       <span class="meta">${meta.map((m) => `<span>${h(m)}</span>`).join('')}</span></div>

@@ -22,6 +22,9 @@
   let busy = false;
   let formUrl = '';               // the last application page with fields on it (kept in your record)
   const draftAsked = new Set();  // questions sent for drafting already (per field, so later wizard pages get theirs)
+  const drafting = new Set();    // fields whose answers your server is drafting right now
+  let draftError = '';
+  const optionsWaited = new Set();  // dropdowns whose late options we waited for once
   let done = false;
   let note = '';
   let reopen = false;
@@ -38,7 +41,7 @@
   const orphaned = (msg) => new Error(/context invalidated|receiving end does not exist/i.test(msg || '')
     ? 'JobApps just updated. Reload this page to use the new version.' : msg);
 
-  function send(path, body, method) {
+  function sendOnce(path, body, method) {
     return new Promise((resolve, reject) => {
       try {
         chrome.runtime.sendMessage({ type: 'api', path, body, method }, (r) => {
@@ -49,6 +52,18 @@
         reject(orphaned(e.message));
       }
     });
+  }
+
+  // Chrome stops an extension's service worker when it has been busy or idle too long, and a request it was
+  // relaying then ends with "message port closed". Asking again wakes a new one.
+  async function send(path, body, method) {
+    try {
+      return await sendOnce(path, body, method);
+    } catch (e) {
+      if (!/message port closed/i.test((e && e.message) || '')) throw e;
+      await sleep(400);
+      return sendOnce(path, body, method);
+    }
   }
 
   // The job this tab was working on before this page (see background.js): an application that continues on another
@@ -541,7 +556,7 @@
       if (r.seconds !== seconds) { seconds = r.seconds; if (handled.size) render(); }
     } catch (e) { /* the server is unreachable for now; the next tick tries again */ }
   }
-  setInterval(tick, 15000);  // twice per 30 s slice, so no active slice is missed
+  const tickTimer = setInterval(tick, 15000);  // twice per 30 s slice, so no active slice is missed
   const clock = () => (seconds >= 60 ? `${Math.round(seconds / 60)} min on this application` : '');
 
   // ------------------------------------------------------------- the panel
@@ -559,7 +574,8 @@
       drafts: items.filter((x) => x.state === 'draft').length,
       todo,
       drafted: items.filter((x) => x.state === 'draft').map((x) => ({ id: x.action.id, label: x.action.label })),
-      note,
+      note: [note, drafting.size ? `Drafting ${drafting.size} answer${drafting.size > 1 ? 's' : ''} from your resume (about a minute). Fill in the rest meanwhile.` : '',
+        draftError].filter(Boolean).join(' '),
       timer: clock(),
       buttons: done ? [] : [{ id: 'applied', label: 'I submitted it', primary: true }, { id: 'rescan', label: 'Fill again' }],
       inFrame,
@@ -579,6 +595,9 @@
   // Postal Code now asks City). What you type there answers the question it asks now, never the one JobApps filled.
   const qnorm = (s) => String(s || '').toLowerCase().replace(/[✱*]+|\((required|optional)\)/g, ' ').replace(/\s+/g, ' ').trim();
   const reused = (x, now) => !!(x && x.field && now && (qnorm(x.field.label) !== qnorm(now.label) || x.field.type !== now.type));
+  // A dropdown planned before its options arrived, which has them now.
+  const grewOptions = (x, now) => !!(x && x.field && now && x.field.type === 'select' && !(x.field.options || []).length
+    && (now.options || []).length && x.state !== 'filled');
   const scanNow = () => new Map((J() ? J().scan() : []).map((f) => [f.id, f]));
   function forget(id) { handled.delete(id); assisted.delete(id); userValues.delete(id); }
 
@@ -619,6 +638,9 @@
       const r = await send('/api/ext/learn', { ...ctx(), entries: merge(stored.entries, now.entries), edited_drafts: merge(stored.edited, now.edited) });
       await send('/api/ext/status', { ...ctx(), status, form_url: formUrl || location.href });
       await chrome.storage.local.remove(key);
+      unwatchPage();
+      clearInterval(tickTimer);
+      drafting.clear();
       note = `Marked as ${status} on your dashboard.${r.saved ? ` Remembered ${r.saved} answer${r.saved > 1 ? 's' : ''} you typed for next time.` : ''}`;
     } catch (e) {
       note = `Couldn't reach your JobApps server: ${e.message}`;
@@ -666,23 +688,111 @@
     const x = handled.get(id);
     if (x && (x.state === 'missing' || x.state === 'manual') && rememberable(x, p.value)) remember(id, p.value);
   };
-  window.addEventListener('jobapps-action', (e) => {
-    if (e.detail === 'applied') finish('applied');
-    if (e.detail === 'rescan') { force = true; run(); }
-    if (e.detail === 'dismiss') { dismissed = true; J().closePanel(); }
-  });
+  // The panel's buttons (filler.js calls this from the extension's own world; the page can't).
+  function onAction(id) {
+    if (id === 'applied') finish('applied');
+    if (id === 'rescan') { fillAgain(); run(); }
+    if (id === 'dismiss') { dismissed = true; J().closePanel(); unwatchPage(); }
+    // Closed on a page you found yourself: stop watching it. Today's jobs keep the timer, the next page of the
+    // application and "applied" going (the toolbar button brings the panel back).
+    if (id === 'close' && !force && !(job && job.in_batch)) unwatchPage();
+  }
+  if (J()) J().onAction = onAction;
+
+  // "Fill again" or Alt+J: fill this page, and ask again for drafts that didn't come.
+  function fillAgain() {
+    force = true;
+    draftError = '';
+    for (const id of [...draftAsked]) if (!drafting.has(id)) draftAsked.delete(id);
+    watchPage();
+  }
+
+  // ------------------------------------------------------------- drafting
+  // Your server drafts in the background (it often takes longer than an extension may wait for one reply) and
+  // this page asks every few seconds how it is going. The rest of the page is filled meanwhile.
+
+  let polling = false;
+  async function startDrafts(ids, fields) {
+    ids.forEach((id) => { draftAsked.add(id); drafting.add(id); });
+    let r;
+    try {
+      r = await send('/api/ext/draft', { ...ctx(), fields: fields.filter((f) => ids.includes(f.id)),
+        page_text: document.body.innerText.slice(0, 40000) });
+    } catch (e) {
+      ids.forEach((id) => drafting.delete(id));  // "Fill again" asks again
+      draftError = `Drafting didn't work this time: ${e.message}`;
+      return;
+    }
+    pollDrafts(r.job_id || (job && job.id));
+  }
+
+  function runSoon() {
+    if (busy) { setTimeout(runSoon, 500); return; }
+    run();
+  }
+
+  async function pollDrafts(jobId) {
+    if (polling || !jobId) return;
+    polling = true;
+    const until = Date.now() + 6 * 60 * 1000;
+    try {
+      while (drafting.size && !done) {
+        await sleep(3000);
+        let r = null;
+        try { r = await send(`/api/ext/draft/${encodeURIComponent(jobId)}`, null, 'GET'); } catch (e) { /* try again */ }
+        if (r && r.state === 'running') {
+          if (Date.now() < until) continue;
+          draftError = 'Drafting is taking longer than usual. Press Fill again in a minute to fetch the answers.';
+        } else if (!r) {
+          if (Date.now() < until) continue;
+          draftError = 'Lost touch with your server while it was drafting. Press Fill again.';
+        } else if (r.state === 'error') {
+          draftError = `Drafting didn't work this time: ${r.error}`;
+        } else if (r.state === 'idle') {  // the server restarted and lost the request
+          draftError = 'Drafting stopped because your server restarted. Press Fill again.';
+        }
+        // Plan these fields again: the answers are in now (a box you typed in meanwhile keeps your text).
+        for (const id of drafting) { handled.delete(id); assisted.delete(id); }
+        drafting.clear();
+        render();
+        runSoon();
+        return;
+      }
+    } finally {
+      polling = false;
+    }
+  }
 
   // ------------------------------------------------------------- main loop
 
+  let again = false;  // the page changed while a fill was running: look once more when it's done
   async function run() {
-    if (busy || done || !J()) return;
+    if (done || !J()) return;
+    if (busy) { again = true; return; }
     busy = true;
+    again = false;
     try {
       for (const id of [...handled.keys()]) {  // forget fields the page has since removed or re-rendered
         if (!document.querySelector(`[${ATTR}="${id}"]`)) { handled.delete(id); assisted.delete(id); }
       }
-      const scanned = J().scan();
-      for (const f of scanned) if (reused(handled.get(f.id), f)) forget(f.id);  // same box, new question: plan it afresh
+      let scanned = J().scan();
+      // A dropdown whose options are still loading (some Province or Country lists arrive after the form): give it
+      // a moment, so it isn't planned as a question JobApps has no answer for.
+      const empty = scanned.filter((f) => f.type === 'select' && !f.options.length && !optionsWaited.has(f.id) && !handled.has(f.id));
+      if (empty.length) {
+        empty.forEach((f) => optionsWaited.add(f.id));
+        const loaded = () => empty.every((f) => {
+          const el = document.querySelector(`[${ATTR}="${f.id}"]`);
+          // the same test as filler.js's scan: a placeholder ("Select...") isn't an option
+          return !el || [...(el.options || [])].some((o) => o.value || (clean(o.text) && !/^(select|choose|please|--)/i.test(clean(o.text))));
+        });
+        await waitFor(loaded, 2000, 200);
+        scanned = J().scan();
+      }
+      for (const f of scanned) {
+        const x = handled.get(f.id);
+        if (reused(x, f) || grewOptions(x, f)) forget(f.id);  // same box with a new question or new options: plan it afresh
+      }
       const fields = scanned.filter((f) => !handled.has(f.id));
       if (fields.length && job && (force || job.in_batch)) formUrl = location.href;  // the form you filled, not the thank-you page
       if (pageUrl !== location.href) { pageUrl = location.href; announcedFor = ''; offeredFields = -1; }  // single-page apps change pages in place
@@ -704,17 +814,7 @@
         return;
       }
       const toDraft = plan.needs_draft.filter((id) => !draftAsked.has(id));
-      if (toDraft.length && plan.can_draft) {
-        toDraft.forEach((id) => draftAsked.add(id));
-        note = `Drafting ${toDraft.length} answer${toDraft.length > 1 ? 's' : ''} from your resume (about 30 seconds)…`;
-        render();
-        try {
-          await send('/api/ext/draft', { ...ctx(), fields: fields.filter((f) => toDraft.includes(f.id)),
-            page_text: document.body.innerText.slice(0, 40000) });
-          plan = await send('/api/ext/plan', { ...ctx(), fields });
-          note = '';
-        } catch (e) { note = `Drafting didn't work this time: ${e.message}`; }
-      }
+      if (toDraft.length && plan.can_draft) await startDrafts(toDraft, fields);
       // Fields that change the form go first (Country re-renders the address; "I currently work here"
       // removes the end date); uploads go last.
       const weight = (a) => (a.op === 'file' ? 3 : /^country/i.test(a.label) ? 0 : a.op === 'check' ? 1 : 2);
@@ -735,6 +835,10 @@
         const field = fields.find((f) => f.id === a.id);
         let state = a.state;
         let typed = null;
+        if (!a.op && drafting.has(a.id)) {  // its answer is being drafted: filled in when it arrives
+          state = 'drafting';
+          a.note = 'being drafted from your resume';
+        }
         if (a.op) {
           try {
             typed = await perform(a);
@@ -753,7 +857,7 @@
           }
         }
         handled.set(a.id, { field, action: a, state, typed });
-        J().mark(a.id, state, a.note);
+        J().mark(a.id, state === 'drafting' ? 'draft' : state, a.note);
       }
       if (note.startsWith('Filling ')) note = '';
       const infos = [...handled.values()].map((x) => x.action.info).filter(Boolean);
@@ -775,6 +879,7 @@
       }
     } finally {
       busy = false;
+      if (again && !done) { again = false; setTimeout(run, 300); }
     }
   }
 
@@ -821,8 +926,8 @@
   }
 
   function submittedNow() {
-    const text = (document.body && document.body.innerText.slice(0, 20000)) || '';
-    return saysSubmitted(text) && J() && J().count() <= 2;
+    if (!J() || J().count() > 2) return false;  // a form is still on the page (and reading all its text is slow)
+    return saysSubmitted((document.body && document.body.innerText.slice(0, 20000)) || '');
   }
 
   // A "submitted" page counts for one of today's jobs, and, when only this tab ties it to the job (Workday's
@@ -847,23 +952,67 @@
       if (plan && settles(plan.job)) { job = plan.job; finish('applied'); }
       return;
     }
+    watchPage();  // before the first fill: a page that changes during it (late options, a new question) is looked at again
     await run();
-    let timer = null;
-    new MutationObserver((mutations) => {
-      if (mutations.every((m) => m.target.closest && m.target.closest('[data-jobapps-panel]'))) return;
-      if (J() && J().ensurePanel) J().ensurePanel();  // sites that re-render the whole page remove it
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        if (done) return;
-        // not for a page you found yourself unless you asked JobApps to fill it (it read candidate homes as new applications)
-        if ((force ? job : settles(job)) && submittedNow()) { finish('applied'); return; }
-        if (force || (job ? job.in_batch || !dismissed : !inFrame)) run();  // offers re-check as forms appear
-      }, 1200);
-    }).observe(document.documentElement, { childList: true, subtree: true });
   }
 
+  // Watching the page for new fields (the next page of a wizard, a question that appears) and for the
+  // confirmation page. A scan waits for the page to be quiet for a moment, runs at most every few seconds on a
+  // page that never stops changing, and stops for good once the job is marked or you dismiss the offer.
+  const QUIET_MS = 1200;     // a quiet moment after the last change
+  const MAX_WAIT_MS = 5000;  // a page that keeps changing still gets a scan this often
+  const MIN_GAP_MS = 2500;   // never sooner than this after the last scan
+  let observer = null;
+  let quietTimer = null;
+  let firstChange = 0;
+  let lastScan = 0;
+  let changedWhileHidden = false;
+  const OURS = '[data-jobapps-panel], [data-jobapps-rail]';
+  const ours = (n) => n.nodeType === 1 && n.matches(OURS);
+  const onlyOurs = (m) => (m.target.closest && m.target.closest(OURS))
+    || ((m.addedNodes.length || m.removedNodes.length) && [...m.addedNodes, ...m.removedNodes].every(ours));
+
+  function watchPage() {
+    if (observer || done) return;
+    observer = new MutationObserver((mutations) => {
+      if (J() && J().ensurePanel) J().ensurePanel();  // sites that re-render the whole page remove it
+      if (!mutations.every(onlyOurs)) schedule();
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  function unwatchPage() {
+    if (observer) observer.disconnect();
+    clearTimeout(quietTimer);
+    observer = null;
+    quietTimer = null;
+    firstChange = 0;
+  }
+
+  function schedule() {
+    const now = Date.now();
+    if (!firstChange) firstChange = now;
+    clearTimeout(quietTimer);
+    const wait = Math.max(Math.min(QUIET_MS, MAX_WAIT_MS - (now - firstChange)), MIN_GAP_MS - (now - lastScan), 0);
+    quietTimer = setTimeout(onQuiet, wait);
+  }
+
+  function onQuiet() {
+    quietTimer = null;
+    firstChange = 0;
+    if (done || !observer) return;
+    lastScan = Date.now();
+    // not for a page you found yourself unless you asked JobApps to fill it (it read candidate homes as new applications)
+    if ((force ? job : settles(job)) && submittedNow()) { finish('applied'); return; }
+    if (document.visibilityState === 'hidden') { changedWhileHidden = true; return; }  // scanned when you come back
+    if (force || (job ? job.in_batch || !dismissed : !inFrame)) run();  // offers re-check as forms appear
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && changedWhileHidden && observer) { changedWhileHidden = false; schedule(); }
+  });
+
   chrome.runtime.onMessage.addListener((msg) => {
-    if (msg && msg.type === 'fill') { force = true; reopen = true; run(); }
+    if (msg && msg.type === 'fill') { fillAgain(); reopen = true; run(); }
   });
 
   start();

@@ -80,11 +80,20 @@ school and link in your profile, and replaces what Workday guessed from your res
 | SmartRecruiters, iCIMS, Taleo, SuccessFactors, Jobvite, BambooHR, Rippling, Dayforce, UKG, Paylocity, ADP, Eightfold, Phenom, Avature and others | description, when the page can be read without running JavaScript | yes |
 
 The extension runs on the 54 host patterns listed in `jobapps/extension/manifest.json`. On any other
-site, use "Fill this page" in the popup.
+site, use "Fill this page" in the popup. When an application continues on a company's own career site,
+the popup also offers "Run JobApps on" that site. Chrome asks you to allow that one site, and from then
+on the extension fills and times applications there by itself. Remove a site under the extension's
+details in `chrome://extensions`.
+
+Time on an application is counted while the extension runs on its pages. When it barely saw an
+application, History uses the time from pressing "Open application" to "applied" instead, if that was
+under two hours, counted as at most 45 minutes, and marks it as an estimate.
 
 Written answers are only drafted ahead of time where the questions can be read ahead, which is
 Greenhouse, Lever and Ashby. On other sites the extension asks the server for drafts when it finds
-written questions on the page.
+written questions on the page. The server writes them in the background, which takes about a minute.
+The extension fills the rest of the page meanwhile and puts the drafts in when they arrive. If drafting
+fails, the panel says so, and "Fill again" asks once more.
 
 ## Command line
 

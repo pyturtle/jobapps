@@ -2,28 +2,74 @@
 // fills the current tab when you press Alt+J or use "Fill this page" in the toolbar popup.
 importScripts('config.js');
 
+// Every request has a deadline: Chrome may stop this worker while it waits, and the page would wait forever.
+// (Drafting, which takes longer, runs in the background on the server; see content.js.)
+const TIMEOUT_MS = 25000;
+
 async function call(path, body, method) {
-  const res = await fetch(JOBAPPS_SERVER + path, {
-    method: method || (body ? 'POST' : 'GET'),
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `server said ${res.status}`);
-  return data;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(JOBAPPS_SERVER + path, {
+      method: method || (body ? 'POST' : 'GET'),
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctl.signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `server said ${res.status}`);
+    return data;
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error(`no answer from your server in ${TIMEOUT_MS / 1000} seconds`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const FILES = ['config.js', 'filler.js', 'content.js'];
+
+async function injectTab(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: FILES });
+  } catch (e) {
+    // Some frames belong to sites we have no access to; the page and the job-board frames still work.
+    try { await chrome.scripting.executeScript({ target: { tabId }, files: FILES }); } catch (e2) { /* content script may already be there */ }
+  }
 }
 
 async function fillTab(tabId) {
   if (!tabId) return;
-  const files = ['config.js', 'filler.js', 'content.js'];
-  try {
-    await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files });
-  } catch (e) {
-    // Some frames belong to sites we have no access to; the page and the job-board frames still work.
-    try { await chrome.scripting.executeScript({ target: { tabId }, files }); } catch (e2) { /* content script may already be there */ }
-  }
+  await injectTab(tabId);
   try { await chrome.tabs.sendMessage(tabId, { type: 'fill' }); } catch (e) { /* no listener in this tab */ }
 }
+
+// Career sites you turned on from the popup ("Run JobApps on this site"). The manifest's job boards get the
+// scripts by themselves; an application that continues on a company's own site only did after Alt+J, so its
+// time went uncounted. A site you allow gets the same scripts, registered here, and loses them if you remove
+// the site's access in chrome://extensions.
+const BUILT_IN = new Set(chrome.runtime.getManifest().host_permissions || []);
+
+async function syncSites() {
+  const { origins = [] } = await chrome.permissions.getAll();
+  const sites = origins.filter((o) => !BUILT_IN.has(o) && /^https:\/\/[^*/]+\/\*$/.test(o));
+  await chrome.scripting.unregisterContentScripts({ ids: ['sites'] }).catch(() => {});
+  if (sites.length) {
+    await chrome.scripting.registerContentScripts([{ id: 'sites', matches: sites, js: FILES, allFrames: true, runAt: 'document_idle' }]);
+  }
+  return sites;
+}
+
+chrome.permissions.onAdded.addListener(async (added) => {
+  await syncSites().catch(() => {});
+  // The page you were on when you allowed it starts right away (the popup may already have closed).
+  for (const origin of added.origins || []) {
+    const tabs = await chrome.tabs.query({ url: origin }).catch(() => []);
+    for (const t of tabs) await injectTab(t.id);
+  }
+});
+chrome.permissions.onRemoved.addListener(() => { syncSites().catch(() => {}); });
+chrome.runtime.onInstalled.addListener(() => { syncSites().catch(() => {}); });
 
 // Which of today's jobs each tab is working on. An application often continues on another site (a career page
 // hands you to its ATS, Workday shows your candidate home after you submit): pages there still belong to that job,
@@ -108,3 +154,4 @@ async function checkForUpdate() {
 chrome.alarms.create('jobapps-update', { periodInMinutes: 5 });
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'jobapps-update') checkForUpdate(); });
 chrome.runtime.onStartup.addListener(checkForUpdate);
+chrome.runtime.onStartup.addListener(() => { syncSites().catch(() => {}); });

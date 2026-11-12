@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS unanswered (       -- questions JobApps couldn't fill
     qkey TEXT PRIMARY KEY, label TEXT, type TEXT, options TEXT, rule TEXT, company TEXT, job_id TEXT,
     required INTEGER, seen INTEGER, first_seen TEXT, last_seen TEXT, dismissed INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS unanswered_seen (  -- which applications asked each question: `seen` counts each once
+    qkey TEXT, job_id TEXT,
+    PRIMARY KEY (qkey, job_id)
+);
 CREATE TABLE IF NOT EXISTS activity (         -- the timer: each 30-second slice you were working on an application
     job_id TEXT, slot INTEGER,
     PRIMARY KEY (job_id, slot)
@@ -152,6 +156,40 @@ def active_seconds(conn, job_ids: list[str] | None = None) -> dict[str, int]:
     where = f"WHERE job_id IN ({','.join('?' * len(job_ids))})" if job_ids else ""
     rows = conn.execute(f"SELECT job_id, COUNT(*) AS n FROM activity {where} GROUP BY job_id", job_ids or []).fetchall()
     return {r["job_id"]: r["n"] * SLOT for r in rows}
+
+
+ESTIMATE_GAP = 2 * 3600   # longer than this from opening to applying: you weren't applying all that time
+ESTIMATE_CAP = 45 * 60    # an estimate never counts for more than this
+
+
+def estimated_seconds(conn) -> dict[str, int]:
+    """The time from your last "Open application" on the dashboard to "applied", for applications the timer barely
+    saw: it only runs on the sites the extension knows, so one that continues on a company's own career site gets no
+    ticks. Only a gap under ESTIMATE_GAP counts, and for at most ESTIMATE_CAP."""
+    opened: dict[str, str] = {}
+    out: dict[str, int] = {}
+    for r in conn.execute("SELECT job_id, kind, at FROM events WHERE kind IN ('opened', 'applied') ORDER BY id"):
+        if r["kind"] == "opened":
+            opened[r["job_id"]] = r["at"]
+        elif r["job_id"] in opened:
+            try:
+                gap = (datetime.fromisoformat(r["at"]) - datetime.fromisoformat(opened.pop(r["job_id"]))).total_seconds()
+            except ValueError:
+                continue
+            if 0 < gap <= ESTIMATE_GAP:
+                out[r["job_id"]] = int(min(gap, ESTIMATE_CAP))
+    return out
+
+
+def application_seconds(conn, job_ids: list[str] | None = None) -> dict[str, tuple[int, bool]]:
+    """job id -> (seconds, estimated): the timer's count, or the estimate when the timer saw less than half of it."""
+    tracked = active_seconds(conn, job_ids)
+    out = {k: (v, False) for k, v in tracked.items()}
+    wanted = set(job_ids) if job_ids is not None else None
+    for k, est in estimated_seconds(conn).items():
+        if (wanted is None or k in wanted) and tracked.get(k, 0) * 2 < est:
+            out[k] = (est, True)
+    return out
 
 
 def _listing(row: sqlite3.Row | None) -> dict | None:
@@ -473,19 +511,21 @@ def clear_answers(conn, job_id: str) -> None:
 # --- questions you haven't answered yet ---------------------------------------
 
 def note_unanswered(conn, items: list[dict], company: str, job_id: str) -> None:
-    """items: {qkey, label, type, options, rule, required}. Seen again: counted, options/label refreshed."""
+    """items: {qkey, label, type, options, rule, required}. Seen again: options/label refreshed, and `seen` (which
+    orders the list) goes up once per application that asks it, not on every scan of the same page."""
     stamp = now()
     for q in items:
+        first = conn.execute("INSERT OR IGNORE INTO unanswered_seen(qkey, job_id) VALUES(?, ?)", (q["qkey"], job_id)).rowcount
         conn.execute(
             """INSERT INTO unanswered(qkey, label, type, options, rule, company, job_id, required, seen, first_seen, last_seen)
                VALUES(?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                ON CONFLICT(qkey) DO UPDATE SET label = excluded.label, type = excluded.type,
                    options = CASE WHEN excluded.options != '[]' THEN excluded.options ELSE unanswered.options END,
                    rule = excluded.rule, company = excluded.company, job_id = excluded.job_id,
-                   required = MAX(unanswered.required, excluded.required), seen = unanswered.seen + 1,
+                   required = MAX(unanswered.required, excluded.required), seen = unanswered.seen + ?,
                    last_seen = excluded.last_seen""",
             (q["qkey"], q["label"], q["type"], json.dumps(q.get("options") or []), q.get("rule") or "", company, job_id,
-             int(bool(q.get("required"))), stamp, stamp))
+             int(bool(q.get("required"))), stamp, stamp, 1 if first else 0))
     conn.commit()
 
 
@@ -501,4 +541,5 @@ def answered(conn, qkeys: list[str], dismiss: bool = False) -> None:
             conn.execute("UPDATE unanswered SET dismissed = 1 WHERE qkey = ?", (k,))
         else:
             conn.execute("DELETE FROM unanswered WHERE qkey = ?", (k,))
+            conn.execute("DELETE FROM unanswered_seen WHERE qkey = ?", (k,))
     conn.commit()

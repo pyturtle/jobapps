@@ -46,7 +46,7 @@ def _event_summary(conn) -> dict[str, dict]:
 
 def _all(conn) -> list[dict]:
     apps = {r["job_id"]: r["status"] for r in conn.execute("SELECT job_id, status FROM applications")}
-    secs = db.active_seconds(conn)
+    secs = db.application_seconds(conn)
     ev = _event_summary(conn)
     rows = []
     for l in conn.execute("SELECT id, company, title, url, ats, source, locations, first_seen, last_seen, active, "
@@ -61,11 +61,12 @@ def _all(conn) -> list[dict]:
             "source": l["source"], "locations": locs, "canada": any(is_canadian(x) for x in locs),
             "first_seen": (l["first_seen"] or "")[:10], "last_seen": (l["last_seen"] or "")[:10],
             "posted": datetime.fromtimestamp(l["date_posted"]).date().isoformat() if l["date_posted"] else "",
-            "active": bool(l["active"]), "status": status, "status_label": LABEL[status],
+            "active": bool(l["active"]), "status": status, "status_label": LABEL.get(status, status),
             "listed_on": e.get("listed_on", ""), "how": e.get("how", ""), "done_at": (e.get("done_at") or "")[:16],
             "applied_url": e.get("applied_url", "") if status == "applied" else "",
             "reason": e.get("ruled_out", "") if status == "ruled_out" else "",
-            "minutes": round(secs.get(l["id"], 0) / 60, 1) if l["id"] in secs else None,
+            "minutes": round(secs[l["id"]][0] / 60, 1) if l["id"] in secs else None,
+            "estimated": secs[l["id"]][1] if l["id"] in secs else False,
         })
     return rows
 
@@ -113,15 +114,17 @@ def postings_csv(conn, **filters) -> str:
 
 
 def stats(conn) -> dict:
-    """How long applications take: per application, on average, by site, by day."""
-    secs = db.active_seconds(conn)
+    """How long applications take: per application, on average, by site, by day. Applications the timer barely
+    saw count with their estimate (db.estimated_seconds) and are flagged as estimated."""
+    secs = db.application_seconds(conn)
     done = conn.execute(
         """SELECT a.job_id, a.status, a.updated_at, l.company, l.title, l.ats
            FROM applications a LEFT JOIN listings l ON l.id = a.job_id WHERE a.status = 'applied'
            ORDER BY a.updated_at DESC""").fetchall()
     apps = [{"id": r["job_id"], "company": r["company"] or "", "title": r["title"] or "", "ats": r["ats"] or "other",
              "applied_at": (r["updated_at"] or "")[:16], "day": (r["updated_at"] or "")[:10],
-             "minutes": round(secs[r["job_id"]] / 60, 1) if r["job_id"] in secs else None} for r in done]
+             "minutes": round(secs[r["job_id"]][0] / 60, 1) if r["job_id"] in secs else None,
+             "estimated": secs[r["job_id"]][1] if r["job_id"] in secs else False} for r in done]
     timed = [a for a in apps if a["minutes"]]
     mins = [a["minutes"] for a in timed]
     by_ats: dict[str, list[float]] = {}
@@ -133,7 +136,7 @@ def stats(conn) -> dict:
         d["applied"] += 1
         d["minutes"] += a["minutes"] or 0
     return {
-        "applied": len(apps), "timed": len(timed),
+        "applied": len(apps), "timed": len(timed), "estimated": sum(a["estimated"] for a in timed),
         "average": round(statistics.mean(mins), 1) if mins else None,
         "median": round(statistics.median(mins), 1) if mins else None,
         "fastest": min(timed, key=lambda a: a["minutes"]) if timed else None,

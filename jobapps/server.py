@@ -148,6 +148,8 @@ def unanswered_items(fields: list[dict], actions: list[dict]) -> list[dict]:
             continue
         if plan.has_value(f.get("value")):
             continue
+        if f.get("type") == "select" and not f.get("options"):
+            continue  # its options haven't loaded yet: the extension plans it again once they have
         out.append({"qkey": qkey(a["label"]), "label": a["label"], "type": f.get("type", ""), "options": f.get("options") or [],
                     "rule": a.get("rule") or "", "required": a.get("required")})
     return out
@@ -449,6 +451,70 @@ def site_name(url: str) -> str:
         name = parts[-2] if len(parts) >= 2 else parts[0]
     name = re.sub(r"^(careers?|jobs?|apply|campus\w*)-|-(careers?|jobs?)$", "", name)
     return name.replace("-", " ").title()[:60]
+
+
+class Drafting:
+    """Answers the extension asked for, drafted in the background. Drafting often takes longer than a browser
+    extension may wait for one reply, so the request returns at once and the extension asks how it went
+    (GET /api/ext/draft/<job id>). Questions asked while a job is still drafting are drafted right after."""
+
+    KEEP = 3600  # seconds a finished job's result is kept for the extension to read
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.jobs: dict[str, dict] = {}
+
+    def start(self, job_id: str, work) -> str:
+        """work(): drafts one batch and returns its status dict. Returns "running" or "queued"."""
+        with self.lock:
+            now = time.time()
+            for k in [k for k, v in self.jobs.items() if v["state"] != "running" and now - v["at"] > self.KEEP]:
+                del self.jobs[k]
+            cur = self.jobs.get(job_id)
+            if cur and cur["state"] == "running":
+                cur["queue"].append(work)
+                return "queued"
+            self.jobs[job_id] = {"state": "running", "error": "", "at": now, "queue": [work]}
+        threading.Thread(target=self._drain, args=(job_id,), daemon=True).start()
+        return "running"
+
+    def _drain(self, job_id: str) -> None:
+        errors = []
+        while True:
+            with self.lock:
+                cur = self.jobs[job_id]
+                if not cur["queue"]:
+                    cur.update(state="error" if errors else "done", error="; ".join(errors), at=time.time())
+                    return
+                work = cur["queue"].pop(0)
+            try:
+                result = work() or {}
+                if result.get("status") == "error":
+                    errors.append(result.get("error") or "drafting failed")
+            except Exception as exc:  # noqa: BLE001 - reported to the extension, logged with the traceback
+                RUNNER.log(f"  ! drafting for the extension failed: {exc}\n{traceback.format_exc()}")
+                errors.append(str(exc) or exc.__class__.__name__)
+
+    def state(self, job_id: str) -> dict:
+        with self.lock:
+            cur = self.jobs.get(job_id)
+            return {"state": cur["state"], "error": cur["error"]} if cur else {"state": "idle", "error": ""}
+
+
+DRAFTING = Drafting()
+
+EXT_STATUSES = ("applied", "skipped", "closed", "pending")  # what the extension may set (anything else breaks records)
+
+
+def _minutes(timed: tuple[int, bool]) -> dict:
+    return {"minutes": round(timed[0] / 60, 1), "estimated": timed[1]}
+
+
+def keep_record(conn, job: dict) -> None:
+    """A page you found yourself becomes a posting in your record, so what happens on it shows on the dashboard."""
+    if db.get_listing(conn, job["id"]) is None:
+        db.upsert_listings(conn, [{**job, "terms": [], "category": "", "sponsorship": "", "degrees": [],
+                                   "date_posted": 0, "active": True}], deactivate_missing=False)
 
 
 def adhoc_job(url: str, title: str) -> dict:
@@ -943,22 +1009,34 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"choice": choice, "index": options.index(choice) if choice is not None else -1})
 
     def api_ext_draft(self):
+        """Starts drafting and answers at once (202); the extension then asks GET /api/ext/draft/<job id>."""
         body = self._jbody()
         conn = db.connect()
         try:
             job = self._job_for(conn, body)
-            cfg, profile = load_config(), load_profile()
-            fields = [plan.to_field(f) for f in body.get("fields") or []]
+            keep_record(conn, job)  # a page you found yourself: its drafts belong to a posting the dashboard shows
             form = db.get_form(conn, job["id"]) or {}
             description = form.get("description") or (body.get("page_text") or "")[:40000]
             if not form and description:  # keep the page text so a redraft from the dashboard has the same context
                 db.save_form(conn, job["id"], "page", description, [], body.get("url") or "")
-            result = drafts.draft_job(conn, cfg["drafts"], profile, job, description, fields, date.today(),
-                                      maxlengths={qkey(f["label"]): f["maxlength"] for f in body.get("fields") or [] if f.get("maxlength")},
-                                      log=RUNNER.log)
-            self._json({"status": result.get("status"), "error": result.get("error")})
         finally:
             conn.close()
+        raw = body.get("fields") or []
+        fields = [plan.to_field(f) for f in raw]
+        maxlengths = {qkey(f["label"]): f["maxlength"] for f in raw if f.get("maxlength")}
+
+        def work():
+            c = db.connect()
+            try:
+                return drafts.draft_job(c, load_config()["drafts"], load_profile(), job, description, fields, date.today(),
+                                        maxlengths=maxlengths, log=RUNNER.log)
+            finally:
+                c.close()
+
+        self._json({"state": DRAFTING.start(job["id"], work), "job_id": job["id"]}, 202)
+
+    def api_ext_draft_state(self, job_id):
+        self._json(DRAFTING.state(job_id))
 
     def api_ext_learn(self):
         body = self._jbody()
@@ -981,13 +1059,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_ext_status(self):
         body = self._jbody()
+        status = body.get("status", "applied")
+        if status not in EXT_STATUSES:
+            return self._json({"error": "bad status"}, 400)
         conn = db.connect()
         try:
             job = self._job_for(conn, body)
-            if db.get_listing(conn, job["id"]) is None:  # a job you found yourself: keep it in your record
-                db.upsert_listings(conn, [{**job, "terms": [], "category": "", "sponsorship": "", "degrees": [],
-                                           "date_posted": 0, "active": True}], deactivate_missing=False)
-            status = body.get("status", "applied")
+            keep_record(conn, job)
             db.set_status(conn, job["id"], status, url=body.get("form_url") or body.get("frame_url") or body.get("url"))
         finally:
             conn.close()
@@ -1017,7 +1095,7 @@ class Handler(BaseHTTPRequestHandler):
                         "saved_at": (form.get("fetched_at") or "")[:16], "events": db.events_for(conn, job_id),
                         "answers": [{"question": a["question"], "answer": db.answer_text(a)}
                                     for a in db.answers_for(conn, job_id).values() if db.answer_text(a)],
-                        "minutes": round(db.active_seconds(conn, [job_id]).get(job_id, 0) / 60, 1)})
+                        **_minutes(db.application_seconds(conn, [job_id]).get(job_id, (0, False)))})
         finally:
             conn.close()
 
@@ -1050,6 +1128,7 @@ ROUTES = [
     ("POST", r"/api/memory/dismiss", Handler.api_memory_dismiss),
     ("GET", r"/api/posting/(\w+)", Handler.api_posting),
     ("POST", r"/api/ext/activity", Handler.api_ext_activity),
+    ("GET", r"/api/ext/draft/(\w+)", Handler.api_ext_draft_state),
     ("GET", r"/api/days", Handler.api_days),
     ("GET", r"/api/setup", Handler.api_setup),
     ("POST", r"/api/setup/profile", Handler.api_setup_profile),
