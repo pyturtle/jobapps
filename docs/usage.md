@@ -113,6 +113,7 @@ Run these from the project folder with `.\ja` on Windows, or `python -m jobapps`
 | `ja fetch` | refresh the listings now |
 | `ja report` | rebuild and open today's HTML report |
 | `ja history [--limit N]` | recent applications |
+| `ja notes [--refresh] [--copy FILE]` | the files and pages read with your notes, where each stands, and fetch the pages now |
 | `ja doctor` | check your profile, resume, Claude access and scheduled task |
 
 `--date YYYY-MM-DD` before the command runs it as if it were that day.

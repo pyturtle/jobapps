@@ -27,6 +27,7 @@ ships with.
 | `server` | `daily_at` ("07:30"), `port` (8765), `allowed_logins` (the tailnet accounts let in; empty means the account this PC is signed in to), `allowed_hosts` (extra names the dashboard may be opened under) |
 | `drafts` | `backend` (`auto`, `api`, `claude-cli` or `none`), `model`, `effort`, `parallel`, `timeout_seconds` |
 | `browser` | the browser `ja apply` drives (`msedge`) |
+| `notes` | files on this PC or pages on the web read with `background.md` for every draft and screen (none) |
 
 ### Aiming it at a different search
 
@@ -38,6 +39,26 @@ edit:
   `filters.exclude_terms`, for which roles are considered
 - `scoring.locations`, `scoring.terms` and `scoring.title_keywords`, for what is preferred
 - `max_outside_canada_per_day`, which assumes you are applying from Canada
+
+### Reading more than background.md
+
+`notes` lists files and pages whose text joins your notes in every draft and screen, under a heading
+that names each one:
+
+```yaml
+notes:
+  - more-notes.md                             # a file in this folder, read as it is each time
+  - https://www.nathan-nguyen.dev/llms.txt    # a page: fetched once a day, the last copy kept
+```
+
+A page is fetched by the daily run, or now with `ja notes --refresh`, and its copy is kept under
+`data/notes/`, so a day the page can't be reached still has the last one. A page must be plain text or
+Markdown; an HTML page is refused and the copy kept. `ja notes` and the Setup page say where each
+source stands. Before a page is online, `ja notes --copy FILE` keeps a copy from a file instead, and the
+page replaces it as soon as it can be fetched.
+
+The shipped entry is the author's portfolio, which publishes itself as one text file. A site built the
+same way can do the same, and anything else about you that lives in a file can simply be listed.
 
 ### Choosing how Claude is called
 

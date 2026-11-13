@@ -16,7 +16,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from jobapps import db, discover, drafts, fit, forms, llm, net, picker, report, research, screen, sources
+from jobapps import db, discover, drafts, fit, forms, llm, net, notes, picker, report, research, screen, sources
 from jobapps.config import Profile, load_learned
 from jobapps.forms import Field
 from jobapps.picker import company_keys
@@ -467,6 +467,7 @@ def run_daily(conn, cfg: dict, profile: Profile, today: date, refresh: bool = Fa
               draft: bool = True, fetch_listings: bool = True, log=print):
     if fetch_listings:
         maybe_fetch(conn, cfg, force=refresh, log=log)
+        notes.refresh(cfg, force=refresh, today=today, log=log)
     key = today.isoformat()
     if (not db.batch(conn, key) or more) and db.get_meta(conn, f"discovered:{key}") is None:
         background = drafts.background(profile) if drafts.has_material(profile) else ""

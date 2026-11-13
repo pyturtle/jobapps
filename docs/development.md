@@ -40,6 +40,7 @@ jobapps/
   discover.py    optional web search for postings the lists missed
   forms.py       reads postings and application forms from job-board APIs
   drafts.py      the drafting prompt and the checks on each answer
+  notes.py       the files and pages read with background.md, and the daily copy of each page
   grounding.py   decides whether a quote is in a text
   rules.py       turns a form question into a value from your profile
   plan.py        turns the fields the extension found into fill actions

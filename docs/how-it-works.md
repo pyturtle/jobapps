@@ -148,8 +148,8 @@ never passes. Shorter quotes, such as "May 2028", must match exactly.
 Sponsorship, work authorization and similar yes/no questions are filled from your profile, not
 drafted. Drafting is for written questions.
 
-For each job, Claude gets the posting, your resume, your notes from `background.md`, your
-`writing_preferences`, the questions with their length limits, and any answers already written for
+For each job, Claude gets the posting, your resume, your notes from `background.md` and from any
+file or page listed under `notes` in `config.yaml`, your `writing_preferences`, the questions with their length limits, and any answers already written for
 the same application. It returns, for each question:
 
 - the answer

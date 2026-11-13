@@ -20,6 +20,7 @@ CONFIG_PATH = ROOT / "config.yaml"
 PROFILE_PATH = ROOT / "profile.yaml"
 LEARNED_PATH = ROOT / "learned_answers.yaml"
 BACKGROUND_PATH = ROOT / "background.md"
+NOTES_DIR = DATA_DIR / "notes"   # the last copy of each page listed under `notes` in config.yaml
 
 # Built-in defaults; config.yaml overrides any of these keys.
 DEFAULTS: dict[str, Any] = {
@@ -70,6 +71,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "server": {"port": 8765, "daily_at": "07:30", "tailscale_https_port": 8443, "allowed_logins": [], "allowed_hosts": []},
     "browser": {"channel": "msedge"},
+    "notes": [],   # files on this PC or pages on the web, read with background.md (jobapps/notes.py)
 }
 
 

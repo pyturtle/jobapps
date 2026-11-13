@@ -23,7 +23,7 @@ import webbrowser
 from datetime import date, datetime
 from pathlib import Path
 
-from jobapps import config, db, drafts, fit, llm, picker, pipeline, report
+from jobapps import config, db, drafts, fit, llm, notes, picker, pipeline, report
 from jobapps.config import (BROWSER_PROFILE_DIR, CONFIG_PATH, DATA_DIR, PROFILE_PATH, load_config,
                             load_learned, load_profile)
 from jobapps.forms import Field
@@ -247,11 +247,32 @@ def cmd_history(args, conn, cfg, profile, today):
         log(f"  {h['updated_at'][:10]}  {STATUS_MARK.get(h['status'])} {h['company']} - {h['title']}")
 
 
+def cmd_notes(args, conn, cfg, profile, today):
+    if args.copy:
+        urls = [args.page] if args.page else notes.pages(cfg)
+        if len(urls) != 1:
+            log("Say which page the copy is for: ja notes --copy FILE --page URL")
+            return 1
+        notes.store(urls[0], Path(args.copy).read_text(encoding="utf-8"), f"from {args.copy}")
+    if args.refresh:
+        notes.refresh(cfg, force=True, today=today, log=log)
+    srcs = notes.sources(cfg)
+    if not srcs:
+        log("No extra notes. List files on this PC or pages on the web under `notes` in config.yaml.")
+        return 0
+    log("Read with background.md for every draft and screen:")
+    for s in srcs:
+        log(f"  {s.ref}: {s.status}")
+    return 0
+
+
 def cmd_doctor(args, conn, cfg, profile, today):
     missing = profile.missing()
     log(f"profile.yaml: {'complete' if not missing else 'missing ' + ', '.join(missing)}")
     log(f"resume text: {'found' if drafts.resume_text(profile) else 'none (set files.resume to a PDF in this folder)'}")
     log(f"background for drafts/fit: {'ok' if drafts.has_material(profile) else 'thin - add resume or fill background.md'}")
+    for s in notes.sources(cfg):
+        log(f"notes: {s.ref}: {s.status}")
     kind = llm.backend(cfg["drafts"])
     log(f"LLM backend: {kind}" + {"api": " (ANTHROPIC_API_KEY)", "claude-cli": f" ({shutil.which('claude')}, your Claude login)",
                                   "none": " - prompts only"}.get(kind, ""))
@@ -296,6 +317,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("report", help="rebuild and open today's HTML report")
     p = sub.add_parser("history", help="recent applications")
     p.add_argument("--limit", type=int, default=30)
+    p = sub.add_parser("notes", help="the files and pages read with background.md")
+    p.add_argument("--refresh", action="store_true", help="fetch the pages now instead of waiting for the daily run")
+    p.add_argument("--copy", metavar="FILE", help="use this file as the copy of a page (a local build of the site, say)")
+    p.add_argument("--page", metavar="URL", help="which page --copy is for, when `notes` lists more than one")
     sub.add_parser("doctor", help="check your setup")
     args = ap.parse_args(argv)
     if not args.cmd:
@@ -308,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "serve": cmd_serve, "today": cmd_today, "apply": cmd_apply, "status": cmd_status, "explain": cmd_explain,
         "redraft": cmd_redraft, "skills": cmd_skills, "recheck": cmd_recheck, "fetch": cmd_fetch, "report": cmd_report,
-        "history": cmd_history, "doctor": cmd_doctor,
+        "history": cmd_history, "notes": cmd_notes, "doctor": cmd_doctor,
         "done": lambda *a: _set_status(*a, "applied"), "skip": lambda *a: _set_status(*a, "skipped"),
     }
     try:

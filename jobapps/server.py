@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from jobapps import config, db, drafts, fit, llm, pipeline, plan, records, sources
+from jobapps import config, db, drafts, fit, llm, notes, pipeline, plan, records, sources
 from jobapps.config import ROOT, load_config, load_learned, load_profile, save_learned
 from jobapps.forms import Field
 from jobapps.rules import Resolver, authoritative, choose_option, display, is_consent, month_year, norm, qkey, rule_source
@@ -353,6 +353,7 @@ def setup_view(profile) -> dict:
         "history": [{k: str(j.get(k) or "") for k in HISTORY_KEYS} for j in profile.get("experience.history") or []],
         "background": drafts.notes_text() if config.BACKGROUND_PATH.exists() else "",
         "background_raw": config.BACKGROUND_PATH.read_text(encoding="utf-8") if config.BACKGROUND_PATH.exists() else "",
+        "notes_sources": [{"ref": s.ref, "kind": s.kind, "status": s.status} for s in notes.sources(cfg)],
         "backend": llm.backend(cfg["drafts"]), "model": cfg["drafts"]["model"],
         "daily_at": cfg.get("server", {}).get("daily_at", "07:30"),
         "health": health(),

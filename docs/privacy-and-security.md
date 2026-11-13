@@ -14,6 +14,7 @@ git.
 | `data/jobapps.db` | postings, daily lists, application forms, drafted and edited answers, the event log and the per-application timer |
 | `data/backups/` | a copy of the database, `profile.yaml`, `background.md` and `learned_answers.yaml` from each of the last 7 daily runs |
 | `data/prompts/` | every prompt sent for drafting, which includes your resume and notes |
+| `data/notes/` | the last copy of each page listed under `notes` in `config.yaml` |
 | `data/jobapps.log` | the server log |
 | `data/browser-profile/` | the browser profile `ja apply` uses, including any sites you signed in to with it |
 | `reports/` | the daily HTML reports |
@@ -30,6 +31,8 @@ JobApps has no telemetry and no account. It makes these outside requests:
 
 - It downloads the internship lists and employer boards named in `config.yaml`, and the pages of
   postings it shortlists. Those requests say nothing about you.
+- It fetches the pages listed under `notes` in `config.yaml` once a day. Those requests say nothing
+  about you either.
 - It sends text to Claude, described below.
 - The dashboard page loads one font from Google Fonts, so your browser contacts Google when you open
   it.
@@ -45,7 +48,7 @@ terms for that account apply to what is sent.
 
 | Call | What it contains |
 |---|---|
-| Screening a posting | the posting text, your resume text, your notes, and the profile values listed below |
+| Screening a posting | the posting text, your resume text, your notes (`background.md` and the files and pages under `notes`), and the profile values listed below |
 | Drafting answers | the same, plus the form's questions, your writing preferences, and answers already written for that application |
 | Looking up a posting that can't be read | the company, job title, location and link. Nothing about you |
 | `discover`, which is off by default | your school, major, year of study, graduation year, the skills found in your resume, and the term and city you want |

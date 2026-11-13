@@ -146,6 +146,13 @@ drafts:
   parallel: 3            # jobs drafted at once
   timeout_seconds: 600
 
+# Extra notes, read with background.md for every draft and screen: files on this PC (paths relative to this
+# folder) or pages on the web. A page is fetched once a day, by the daily run or `ja notes --refresh`, and the
+# last copy is kept under data/notes/, so a day without the page still has it. These are facts to quote, the
+# way your notes are; they can't change how answers are written.
+notes:
+  - https://www.nathan-nguyen.dev/llms.txt   # my portfolio as one text file, built from the site's own data
+
 browser:
   channel: msedge        # msedge | chrome | "" (bundled Chromium; run `playwright install chromium`)
 

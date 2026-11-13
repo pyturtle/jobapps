@@ -569,6 +569,9 @@ function renderSetup(s) {
     <p class="help">Projects, experience and short true stories, in plain notes. The more concrete, the less you edit later.</p>
     <textarea class="bg" id="bg">${h(s.background_raw)}</textarea>
     <p style="margin:12px 0 0"><button class="btn primary" id="save-bg">Save notes</button></p>
+    ${(s.notes_sources || []).length ? `<h3 class="sub-h">Also read</h3>
+    <p class="help">Files and pages listed under <code>notes</code> in config.yaml, read with your notes for every draft and screen. A page is fetched once a day and the last copy kept.</p>
+    <dl class="kv">${s.notes_sources.map((n) => `<dt>${h(n.ref)}</dt><dd>${h(n.status)}</dd>`).join('')}</dl>` : ''}
     <h3 class="sub-h">How answers are written</h3>
     <p class="help">Instructions every draft follows, saved when you tick “Remember this for future answers” on an answer.</p>
     ${s.writing_preferences.length ? `<ul class="pref-list">${s.writing_preferences.map((x, i) => `<li><span>${h(x)}</span>

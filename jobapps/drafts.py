@@ -1,7 +1,8 @@
 """Draft answers to free-text application questions, grounded in your resume and notes.
 
-The prompt is built deterministically from profile.yaml, your resume, background.md and the job
-posting, and saved under data/prompts/ so you can see (or reuse) exactly what was asked.
+The prompt is built deterministically from profile.yaml, your resume, background.md, the files and pages
+listed under `notes` in config.yaml, and the job posting, and saved under data/prompts/ so you can see (or
+reuse) exactly what was asked.
 Each answer must list the facts it relies on, quoted from your material; grounding.py checks
 those quotes and any numbers, and the result is stored next to the answer as `checks`.
 Answers are cached per (job, question): they never change unless you redraft.
@@ -13,8 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
 
-from jobapps import db, grounding, llm
-from jobapps.config import BACKGROUND_PATH, DATA_DIR, PROMPTS_DIR, Profile, atomic_write
+from jobapps import db, grounding, llm, notes
+from jobapps.config import BACKGROUND_PATH, DATA_DIR, PROMPTS_DIR, Profile, atomic_write, load_config
 from jobapps.forms import Field
 from jobapps.rules import qkey
 
@@ -240,8 +241,8 @@ def notes_text() -> str:
 
 def has_material(profile: Profile) -> bool:
     """Enough real background to draft from (otherwise drafts would be all placeholders)."""
-    notes = re.sub(r"^#.*$", "", notes_text(), flags=re.M).strip()
-    return bool(resume_text(profile)) or len(notes) > 200
+    own = re.sub(r"^#.*$", "", f"{notes_text()}\n{notes.text(load_config())}", flags=re.M).strip()
+    return bool(resume_text(profile)) or len(own) > 200
 
 
 def background(profile: Profile) -> str:
@@ -270,8 +271,10 @@ def background(profile: Profile) -> str:
     parts = ["## Profile", "\n".join(lines)]
     if text := resume_text(profile):
         parts += ["## Resume", text]
-    if notes := notes_text():
-        parts += ["## Notes from the candidate", notes]
+    if own := notes_text():
+        parts += ["## Notes from the candidate", own]
+    if more := notes.text(load_config()):   # the files and pages under `notes` in config.yaml
+        parts.append(more)
     return "\n\n".join(parts)
 
 
